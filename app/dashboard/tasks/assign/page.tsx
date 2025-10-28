@@ -52,6 +52,7 @@ interface UserSession {
 const isValidObjectId = (id: string) => {
   return /^[0-9a-fA-F]{24}$/.test(id);
 };
+const [isDownloading, setIsDownloading] = useState(false)
 
 export default function TaskAssignPage() {
   const [pendingTasks, setPendingTasks] = useState<any[]>([])
@@ -276,24 +277,44 @@ export default function TaskAssignPage() {
 
  const downloadAllAttachments = async (taskId: string) => {
   try {
+    setIsDownloading(true);
+    console.log("Starting download for task:", taskId);
+    
     const response = await fetch(`/api/tasks/assign?taskId=${taskId}`);
     
     if (!response.ok) {
-      if (response.status === 404) {
+      const errorText = await response.text();
+      console.error("Server response not OK:", response.status, errorText);
+      
+      try {
+        const errorData = JSON.parse(errorText);
         toast({
-          title: "No Files",
-          description: "No attachments found for this task",
+          title: "Download Failed",
+          description: errorData.message || `Server error: ${response.status}`,
           variant: "destructive",
         });
-        return;
+      } catch (e) {
+        toast({
+          title: "Download Failed",
+          description: `Server error: ${response.status}`,
+          variant: "destructive",
+        });
       }
-      throw new Error(`HTTP error! status: ${response.status}`);
+      return;
     }
 
     // Check if response is ZIP
     const contentType = response.headers.get('content-type');
+    console.log("Content-Type:", contentType);
+    
     if (contentType === 'application/zip') {
       const blob = await response.blob();
+      console.log("Blob size:", blob.size);
+      
+      if (blob.size === 0) {
+        throw new Error("Received empty ZIP file");
+      }
+      
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -315,15 +336,16 @@ export default function TaskAssignPage() {
       document.body.removeChild(a);
       
       toast({
-        title: "Download Started",
-        description: "All attachments are being downloaded as ZIP",
+        title: "Download Complete!",
+        description: `All attachments have been downloaded as ${filename}`,
       });
     } else {
-      // Handle JSON response (error case)
+      // Handle case where server returns JSON instead of ZIP
       const data = await response.json();
+      console.error("Server returned JSON instead of ZIP:", data);
       toast({
         title: "Download Failed",
-        description: data.message || "Could not download attachments",
+        description: data.message || "Server returned an unexpected response",
         variant: "destructive",
       });
     }
@@ -331,9 +353,11 @@ export default function TaskAssignPage() {
     console.error("Error downloading attachments:", error);
     toast({
       title: "Download Failed",
-      description: "Could not download attachments. Please try again.",
+      description: error instanceof Error ? error.message : "Could not download attachments. Please try again.",
       variant: "destructive",
     });
+  } finally {
+    setIsDownloading(false);
   }
 };
 
@@ -592,11 +616,16 @@ export default function TaskAssignPage() {
       size="sm" 
       className="text-xs"
       onClick={() => downloadAllAttachments(selectedTask._id)}
+      disabled={isDownloading}
     >
-      <Download className="h-3 w-3 mr-1" />
-      Download All as ZIP ({selectedTask.TasksAttachment.length})
+      {isDownloading ? (
+        <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+      ) : (
+        <Download className="h-3 w-3 mr-1" />
+      )}
+      {isDownloading ? "Downloading..." : `Download All as ZIP (${selectedTask.TasksAttachment.length})`}
     </Button>
-    <div className="text-xs text-muted-foreground">Individual files:</div>
+    <div className="text-xs text-muted-foreground">Click individual files to download them separately:</div>
     <div className="grid gap-1 max-h-20 overflow-y-auto">
       {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
         const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(attachment);
@@ -885,20 +914,25 @@ export default function TaskAssignPage() {
                           {task.assignmentRemarks || "N/A"}
                         </td>
                         <td className="px-3 py-2">
-                          {task.assignmentAttachment && task.assignmentAttachment.length > 0 ? (
-                            <Button 
-                              variant="ghost" 
-                              size="sm" 
-                              className="text-xs h-6 p-1"
-                              onClick={() => downloadAllAttachments(task._id)}
-                            >
-                              <Download className="h-3 w-3" />
-                              <span className="ml-1">{task.assignmentAttachment.length}</span>
-                            </Button>
-                          ) : (
-                            "N/A"
-                          )}
-                        </td>
+  {task.assignmentAttachment && task.assignmentAttachment.length > 0 ? (
+    <Button 
+      variant="ghost" 
+      size="sm" 
+      className="text-xs h-6 p-1"
+      onClick={() => downloadAllAttachments(task._id)}
+      disabled={isDownloading}
+    >
+      {isDownloading ? (
+        <Loader2 className="h-3 w-3 animate-spin" />
+      ) : (
+        <Download className="h-3 w-3" />
+      )}
+      <span className="ml-1">{task.assignmentAttachment.length}</span>
+    </Button>
+  ) : (
+    "N/A"
+  )}
+</td>
                         <td className="px-3 py-2">
                           <Badge className="bg-green-600 text-xs">✅ Assigned</Badge>
                         </td>
