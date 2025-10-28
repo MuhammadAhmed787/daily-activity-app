@@ -48,6 +48,10 @@ interface UserSession {
     permissions: string[]
   }
 }
+// Add this helper function to check if a string is a valid ObjectId
+const isValidObjectId = (id: string) => {
+  return /^[0-9a-fA-F]{24}$/.test(id);
+};
 
 export default function TaskAssignPage() {
   const [pendingTasks, setPendingTasks] = useState<any[]>([])
@@ -270,29 +274,59 @@ export default function TaskAssignPage() {
     setFiles(prev => prev.filter((_, i) => i !== index))
   }
 
-  const downloadAllAttachments = async (taskId: string) => {
-    try {
-      const response = await fetch(`/api/tasks/assign?taskId=${taskId}`)
-      if (!response.ok) throw new Error("Failed to download attachments")
+ const downloadAllAttachments = async (taskId: string) => {
+  try {
+    const response = await fetch(`/api/tasks/assign?taskId=${taskId}&downloadAll=true`);
+    if (!response.ok) throw new Error("Failed to fetch file list");
+    
+    const data = await response.json();
+    
+    if (data.files && data.files.length > 0) {
+      // Download each file individually
+      for (const file of data.files) {
+        try {
+          const fileResponse = await fetch(file.downloadUrl);
+          if (fileResponse.ok) {
+            const blob = await fileResponse.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = file.name;
+            document.body.appendChild(a);
+            a.click();
+            window.URL.revokeObjectURL(url);
+            document.body.removeChild(a);
+            
+            // Small delay between downloads to avoid browser issues
+            await new Promise(resolve => setTimeout(resolve, 500));
+          } else {
+            console.error(`Failed to download file: ${file.name}`);
+          }
+        } catch (fileError) {
+          console.error(`Error downloading file ${file.name}:`, fileError);
+        }
+      }
       
-      const blob = await response.blob()
-      const url = window.URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `task-${selectedTask?.code}-attachments.zip`
-      document.body.appendChild(a)
-      a.click()
-      window.URL.revokeObjectURL(url)
-      document.body.removeChild(a)
-    } catch (error) {
-      console.error("Error downloading attachments:", error)
       toast({
-        title: "Download Failed",
-        description: "Could not download attachments. Please try again.",
+        title: "Downloads Started",
+        description: `Started downloading ${data.files.length} files`,
+      });
+    } else {
+      toast({
+        title: "No Files",
+        description: "No attachments found for this task",
         variant: "destructive",
-      })
+      });
     }
+  } catch (error) {
+    console.error("Error downloading attachments:", error);
+    toast({
+      title: "Download Failed",
+      description: "Could not download attachments. Please try again.",
+      variant: "destructive",
+    });
   }
+};
 
   const getPriorityIcon = (priority: string) => {
     switch (priority) {
@@ -554,21 +588,29 @@ export default function TaskAssignPage() {
                               Download All ({selectedTask.TasksAttachment.length})
                             </Button>
                             <div className="grid gap-1 max-h-20 overflow-y-auto">
-                              {selectedTask.TasksAttachment.map((attachment: string, index: number) => (
-                                <a 
-                                  key={index}
-                                  href={attachment} 
-                                  target="_blank" 
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                                >
-                                  <FileText className="h-3 w-3" />
-                                  File {index + 1}
-                                </a>
-                              ))}
-                            </div>
-                          </div>
-                        ) : "N/A"}
+                               {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
+        // Check if it's a GridFS ObjectId or a regular file path
+        const isGridFSFile = isValidObjectId(attachment);
+        const downloadUrl = isGridFSFile 
+          ? `/api/tasks/assign?taskId=${selectedTask._id}&fileId=${attachment}`
+          : attachment;
+
+        return (
+          <a 
+            key={index}
+            href={downloadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+          >
+            <FileText className="h-3 w-3" />
+            File {index + 1}
+          </a>
+        );
+      })}
+    </div>
+  </div>
+) : "N/A"}
                       </td>
                     </tr>
                     <tr>
