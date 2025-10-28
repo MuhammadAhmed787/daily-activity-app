@@ -1,4 +1,3 @@
-// app/api/tasks/assign/route.ts
 import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Task from "@/models/Task";
@@ -6,6 +5,8 @@ import "@/models/CompanyInformation";
 import CompanyInformation from "@/models/CompanyInformation";
 import { getGridFS } from "@/lib/gridfs";
 import mongoose from "mongoose";
+import { Writable } from "stream";
+import archiver from "archiver";
 
 /**
  * Minimal interfaces
@@ -149,7 +150,7 @@ export async function PUT(req: Request) {
 }
 
 /**
- * GET - Stream individual files instead of creating ZIP (Vercel-compatible)
+ * GET - Create ZIP file in memory for Vercel compatibility
  */
 export async function GET(req: Request) {
   await dbConnect();
@@ -157,8 +158,7 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const taskId = searchParams.get("taskId");
-    const fileId = searchParams.get("fileId"); // For direct file download
-    const downloadAll = searchParams.get("downloadAll"); // For downloading all files
+    const fileId = searchParams.get("fileId");
 
     if (!taskId) {
       return NextResponse.json({ message: "taskId is required" }, { status: 400 });
@@ -178,13 +178,8 @@ export async function GET(req: Request) {
       return await downloadSingleFile(fileId);
     }
 
-    // If downloadAll is requested, provide a list of files with download links
-    if (downloadAll) {
-      return await getFileListResponse(task);
-    }
-
-    // Default behavior: download the first available file or return file list
-    return await getFileListResponse(task);
+    // Otherwise, create ZIP of all attachments
+    return await createZipDownload(task);
   } catch (error: any) {
     console.error("Error handling file download:", error);
     return NextResponse.json({ message: "Failed to handle file download", error: error?.message ?? String(error) }, { status: 500 });
@@ -261,83 +256,132 @@ async function downloadSingleFile(fileId: string) {
 }
 
 /**
- * Get a list of all files with download links
+ * Create ZIP file in memory for all task attachments
  */
-async function getFileListResponse(task: TaskDoc) {
+async function createZipDownload(task: TaskDoc) {
   try {
-    const gfs = await getGridFS(); // Add this line to fix the error
+    const gfs = await getGridFS();
+    
+    if (!mongoose.connection.db) {
+      throw new Error("No mongoose DB connection available");
+    }
+    const db = mongoose.connection.db;
 
+    // Collect all attachments
     const attachments: string[] = [
       ...(task.TasksAttachment ?? []),
       ...(task.assignmentAttachment ?? []),
     ];
 
     if (attachments.length === 0) {
-      return NextResponse.json({ 
-        message: "No attachments available",
-        files: []
-      });
+      return NextResponse.json({ message: "No attachments available" }, { status: 404 });
     }
 
-    if (!mongoose.connection.db) {
-      throw new Error("No mongoose DB connection available");
+    // Create archiver in memory
+    const archive = archiver('zip', {
+      zlib: { level: 9 } // Maximum compression
+    });
+
+    const chunks: Buffer[] = [];
+    
+    // Create a writable stream to collect the ZIP data
+    const writable = new Writable({
+      write(chunk: Buffer, encoding: string, callback: (error?: Error | null) => void) {
+        chunks.push(chunk);
+        callback();
+      }
+    });
+
+    archive.pipe(writable);
+
+    let fileCount = 0;
+
+    // Add each file to the archive
+    for (const attachment of attachments) {
+      if (!mongoose.Types.ObjectId.isValid(String(attachment))) {
+        console.warn(`Skipping invalid ObjectId: ${attachment}`);
+        continue;
+      }
+
+      try {
+        const objId = new mongoose.Types.ObjectId(String(attachment));
+        let fileDoc: any = null;
+
+        // Get file metadata
+        if (typeof (gfs as any).find === "function") {
+          const files = await (gfs as any).find({ _id: objId }).toArray();
+          fileDoc = files && files.length > 0 ? files[0] : null;
+        } else {
+          const files = await db.collection("fs.files").find({ _id: objId }).toArray();
+          fileDoc = files && files.length > 0 ? files[0] : null;
+        }
+
+        if (!fileDoc) {
+          console.warn(`File document not found for: ${attachment}`);
+          continue;
+        }
+
+        // Get file stream
+        const downloadStream = (gfs as any).openDownloadStream
+          ? (gfs as any).openDownloadStream(objId)
+          : null;
+
+        if (!downloadStream) {
+          console.warn(`Download stream not available for: ${attachment}`);
+          continue;
+        }
+
+        // Read stream into buffer
+        const fileChunks: Buffer[] = [];
+        await new Promise<void>((resolve, reject) => {
+          downloadStream.on("data", (chunk: Buffer) => fileChunks.push(chunk));
+          downloadStream.on("end", () => resolve());
+          downloadStream.on("error", (err: any) => reject(err));
+        });
+
+        const fileBuffer = Buffer.concat(fileChunks);
+        const fileName = fileDoc.filename || `file-${String(attachment)}`;
+        
+        // Add file to archive
+        archive.append(fileBuffer, { name: fileName });
+        fileCount++;
+
+        console.log(`Added file to ZIP: ${fileName}`);
+      } catch (error) {
+        console.error(`Error processing file ${attachment}:`, error);
+        continue;
+      }
     }
-    const db = mongoose.connection.db;
 
-    // Get file information for each attachment
-    const filesInfo = await Promise.all(
-      attachments.map(async (attachment) => {
-        if (!mongoose.Types.ObjectId.isValid(String(attachment))) {
-          return {
-            id: attachment,
-            name: `file-${attachment}`,
-            type: "unknown",
-            size: 0,
-            downloadUrl: `/api/tasks/assign?taskId=${task._id}&fileId=${attachment}`
-          };
-        }
+    if (fileCount === 0) {
+      return NextResponse.json({ message: "No downloadable files found" }, { status: 404 });
+    }
 
-        try {
-          const objId = new mongoose.Types.ObjectId(String(attachment));
-          let fileDoc: any = null;
+    // Finalize the archive
+    await archive.finalize();
 
-          if (typeof (gfs as any).find === "function") {
-            const files = await (gfs as any).find({ _id: objId }).toArray();
-            fileDoc = files && files.length > 0 ? files[0] : null;
-          } else {
-            const files = await db.collection("fs.files").find({ _id: objId }).toArray();
-            fileDoc = files && files.length > 0 ? files[0] : null;
-          }
+    // Wait for all data to be written
+    await new Promise<void>((resolve) => {
+      writable.on('finish', () => resolve());
+    });
 
-          return {
-            id: String(attachment),
-            name: fileDoc?.filename || `file-${attachment}`,
-            type: fileDoc?.contentType || "unknown",
-            size: fileDoc?.length || 0,
-            downloadUrl: `/api/tasks/assign?taskId=${task._id}&fileId=${attachment}`
-          };
-        } catch (error) {
-          console.error("Error getting file info:", error);
-          return {
-            id: String(attachment),
-            name: `file-${attachment}`,
-            type: "unknown",
-            size: 0,
-            downloadUrl: `/api/tasks/assign?taskId=${task._id}&fileId=${attachment}`
-          };
-        }
-      })
-    );
+    // Combine all chunks into single buffer
+    const zipBuffer = Buffer.concat(chunks);
+    const zipFileName = `task-${task.code || task._id}-attachments.zip`;
 
-    return NextResponse.json({
-      message: "Files retrieved successfully",
-      taskCode: task.code,
-      files: filesInfo
+    console.log(`Created ZIP file: ${zipFileName} with ${fileCount} files, size: ${zipBuffer.length} bytes`);
+
+    return new Response(zipBuffer, {
+      headers: {
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${zipFileName}"`,
+        "Content-Length": zipBuffer.length.toString(),
+      },
     });
   } catch (error: any) {
-    console.error("Error in getFileListResponse:", error);
+    console.error("Error creating ZIP file:", error);
     return NextResponse.json({ 
-      message: "Failed to get file list", 
+      message: "Failed to create ZIP file", 
       error: error?.message ?? String(error) 
     }, { status: 500 });
   }
