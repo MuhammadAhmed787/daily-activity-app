@@ -150,7 +150,7 @@ export async function PUT(req: Request) {
 }
 
 /**
- * GET - Download files (single or ZIP)
+ * GET - Download files (single or ZIP) with timeout protection
  */
 export async function GET(req: Request) {
   await dbConnect();
@@ -178,8 +178,8 @@ export async function GET(req: Request) {
       return await downloadSingleFile(fileId);
     }
 
-    // Otherwise, create ZIP of all attachments
-    return await createZipDownload(task);
+    // Otherwise, create ZIP of all attachments with timeout protection
+    return await createZipDownloadWithTimeout(task);
   } catch (error: any) {
     console.error("Error handling file download:", error);
     return NextResponse.json({ message: "Failed to handle file download", error: error?.message ?? String(error) }, { status: 500 });
@@ -256,11 +256,41 @@ async function downloadSingleFile(fileId: string) {
 }
 
 /**
- * Create ZIP file in memory for all task attachments
+ * Create ZIP file with timeout protection
+ */
+async function createZipDownloadWithTimeout(task: TaskDoc) {
+  // Set timeout based on Vercel plan (8 seconds for Hobby, 55 seconds for Pro)
+  const timeoutMs = 8000; // 8 seconds to be safe
+  
+  const timeoutPromise = new Promise<NextResponse>((resolve) => {
+    setTimeout(() => {
+      resolve(NextResponse.json({ 
+        message: "ZIP creation timeout - files are too large or too many. Please download files individually.",
+        fallback: true
+      }, { status: 408 })); // 408 Request Timeout
+    }, timeoutMs);
+  });
+
+  const zipPromise = createZipDownload(task);
+
+  try {
+    // Race between ZIP creation and timeout
+    return await Promise.race([zipPromise, timeoutPromise]);
+  } catch (error: any) {
+    console.error("Error in ZIP creation:", error);
+    return NextResponse.json({ 
+      message: "Failed to create ZIP file", 
+      error: error?.message ?? String(error)
+    }, { status: 500 });
+  }
+}
+
+/**
+ * Create ZIP file in memory for all task attachments (optimized version)
  */
 async function createZipDownload(task: TaskDoc) {
   try {
-    console.log(`Starting ZIP creation for task: ${task._id}`);
+    console.log(`Starting optimized ZIP creation for task: ${task._id}`);
     const gfs = await getGridFS();
     
     if (!mongoose.connection.db) {
@@ -282,9 +312,55 @@ async function createZipDownload(task: TaskDoc) {
       return NextResponse.json({ message: "No attachments available" }, { status: 404 });
     }
 
-    // Create archiver in memory
+    // Check total size before processing (quick size check)
+    let totalEstimatedSize = 0;
+    const validAttachments = [];
+    
+    for (const attachment of attachments) {
+      if (!mongoose.Types.ObjectId.isValid(String(attachment))) {
+        continue;
+      }
+
+      try {
+        const objId = new mongoose.Types.ObjectId(String(attachment));
+        let fileDoc: any = null;
+
+        if (typeof (gfs as any).find === "function") {
+          const files = await (gfs as any).find({ _id: objId }).toArray();
+          fileDoc = files && files.length > 0 ? files[0] : null;
+        } else {
+          const files = await db.collection("fs.files").find({ _id: objId }).toArray();
+          fileDoc = files && files.length > 0 ? files[0] : null;
+        }
+
+        if (fileDoc && fileDoc.length) {
+          totalEstimatedSize += fileDoc.length;
+          validAttachments.push({ attachment, fileDoc });
+          
+          // If total size exceeds 20MB, stop early
+          if (totalEstimatedSize > 20 * 1024 * 1024) {
+            console.log("Total file size exceeds 20MB, returning fallback");
+            return NextResponse.json({ 
+              message: "Total file size too large for ZIP download (over 20MB). Please download files individually.",
+              fallback: true
+            }, { status: 413 });
+          }
+        }
+      } catch (error) {
+        console.warn(`Error checking file size for ${attachment}:`, error);
+      }
+    }
+
+    if (validAttachments.length === 0) {
+      console.log("No valid attachments found");
+      return NextResponse.json({ message: "No downloadable files found" }, { status: 404 });
+    }
+
+    console.log(`Processing ${validAttachments.length} files, estimated size: ${(totalEstimatedSize / 1024 / 1024).toFixed(2)} MB`);
+
+    // Create archiver with faster compression
     const archive = archiver('zip', {
-      zlib: { level: 5 } // Medium compression to save memory
+      zlib: { level: 1 } // Faster compression
     });
 
     const chunks: Buffer[] = [];
@@ -310,36 +386,14 @@ async function createZipDownload(task: TaskDoc) {
     });
 
     let fileCount = 0;
+    let processedSize = 0;
 
-    // Add each file to the archive
-    for (const [index, attachment] of attachments.entries()) {
-      if (!mongoose.Types.ObjectId.isValid(String(attachment))) {
-        console.warn(`Skipping invalid ObjectId at index ${index}: ${attachment}`);
-        continue;
-      }
-
+    // Process files with progress monitoring
+    for (const { attachment, fileDoc } of validAttachments) {
       try {
-        console.log(`Processing attachment ${index + 1}/${attachments.length}: ${attachment}`);
+        console.log(`Processing file ${fileCount + 1}/${validAttachments.length}: ${fileDoc.filename}`);
+        
         const objId = new mongoose.Types.ObjectId(String(attachment));
-        let fileDoc: any = null;
-
-        // Get file metadata
-        if (typeof (gfs as any).find === "function") {
-          const files = await (gfs as any).find({ _id: objId }).toArray();
-          fileDoc = files && files.length > 0 ? files[0] : null;
-        } else {
-          const files = await db.collection("fs.files").find({ _id: objId }).toArray();
-          fileDoc = files && files.length > 0 ? files[0] : null;
-        }
-
-        if (!fileDoc) {
-          console.warn(`File document not found for: ${attachment}`);
-          continue;
-        }
-
-        console.log(`Found file document: ${fileDoc.filename}, size: ${fileDoc.length} bytes`);
-
-        // Get file stream
         const downloadStream = (gfs as any).openDownloadStream
           ? (gfs as any).openDownloadStream(objId)
           : null;
@@ -349,13 +403,13 @@ async function createZipDownload(task: TaskDoc) {
           continue;
         }
 
-        // Read stream into buffer
+        // Read stream into buffer with progress
         const fileChunks: Buffer[] = [];
         await new Promise<void>((resolve, reject) => {
           downloadStream.on("data", (chunk: Buffer) => fileChunks.push(chunk));
           downloadStream.on("end", () => resolve());
           downloadStream.on("error", (err: any) => {
-            console.error(`Stream error for ${attachment}:`, err);
+            console.error(`Stream error for ${fileDoc.filename}:`, err);
             reject(err);
           });
         });
@@ -363,16 +417,21 @@ async function createZipDownload(task: TaskDoc) {
         const fileBuffer = Buffer.concat(fileChunks);
         const fileName = fileDoc.filename || `file-${String(attachment)}`;
         
-        console.log(`Adding file to ZIP: ${fileName}, size: ${fileBuffer.length} bytes`);
-        
         // Add file to archive
         archive.append(fileBuffer, { name: fileName });
         fileCount++;
+        processedSize += fileBuffer.length;
 
-        console.log(`Successfully added file ${index + 1} to archive`);
+        console.log(`Added file to ZIP: ${fileName}, size: ${(fileBuffer.length / 1024).toFixed(1)} KB`);
+
+        // Check if we're approaching memory limits
+        if (processedSize > 15 * 1024 * 1024) { // 15MB
+          console.log("Approaching memory limits, finalizing early");
+          break;
+        }
 
       } catch (error) {
-        console.error(`Error processing file ${attachment}:`, error);
+        console.error(`Error processing file ${fileDoc.filename}:`, error);
         continue;
       }
     }
@@ -382,7 +441,7 @@ async function createZipDownload(task: TaskDoc) {
       return NextResponse.json({ message: "No downloadable files found" }, { status: 404 });
     }
 
-    console.log(`Finalizing archive with ${fileCount} files`);
+    console.log(`Finalizing archive with ${fileCount} files, total size: ${(processedSize / 1024 / 1024).toFixed(2)} MB`);
 
     // Finalize the archive
     await archive.finalize();
@@ -403,7 +462,7 @@ async function createZipDownload(task: TaskDoc) {
     const zipBuffer = Buffer.concat(chunks);
     const zipFileName = `task-${task.code || task._id}-attachments.zip`;
 
-    console.log(`Created ZIP file: ${zipFileName} with ${fileCount} files, total ZIP size: ${zipBuffer.length} bytes`);
+    console.log(`Created ZIP file: ${zipFileName} with ${fileCount} files, ZIP size: ${(zipBuffer.length / 1024 / 1024).toFixed(2)} MB`);
 
     return new Response(zipBuffer, {
       headers: {
@@ -414,7 +473,6 @@ async function createZipDownload(task: TaskDoc) {
     });
   } catch (error: any) {
     console.error("Error creating ZIP file:", error);
-    console.error("Error stack:", error.stack);
     return NextResponse.json({ 
       message: "Failed to create ZIP file", 
       error: error?.message ?? String(error)
