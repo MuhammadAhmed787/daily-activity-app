@@ -276,45 +276,54 @@ export default function TaskAssignPage() {
 
  const downloadAllAttachments = async (taskId: string) => {
   try {
-    const response = await fetch(`/api/tasks/assign?taskId=${taskId}&downloadAll=true`);
-    if (!response.ok) throw new Error("Failed to fetch file list");
+    const response = await fetch(`/api/tasks/assign?taskId=${taskId}`);
     
-    const data = await response.json();
-    
-    if (data.files && data.files.length > 0) {
-      // Download each file individually
-      for (const file of data.files) {
-        try {
-          const fileResponse = await fetch(file.downloadUrl);
-          if (fileResponse.ok) {
-            const blob = await fileResponse.blob();
-            const url = window.URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = file.name;
-            document.body.appendChild(a);
-            a.click();
-            window.URL.revokeObjectURL(url);
-            document.body.removeChild(a);
-            
-            // Small delay between downloads to avoid browser issues
-            await new Promise(resolve => setTimeout(resolve, 500));
-          } else {
-            console.error(`Failed to download file: ${file.name}`);
-          }
-        } catch (fileError) {
-          console.error(`Error downloading file ${file.name}:`, fileError);
+    if (!response.ok) {
+      if (response.status === 404) {
+        toast({
+          title: "No Files",
+          description: "No attachments found for this task",
+          variant: "destructive",
+        });
+        return;
+      }
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    // Check if response is ZIP
+    const contentType = response.headers.get('content-type');
+    if (contentType === 'application/zip') {
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      
+      // Get filename from Content-Disposition header or use default
+      const contentDisposition = response.headers.get('content-disposition');
+      let filename = `task-${taskId}-attachments.zip`;
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+        if (filenameMatch) {
+          filename = filenameMatch[1];
         }
       }
       
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+      
       toast({
-        title: "Downloads Started",
-        description: `Started downloading ${data.files.length} files`,
+        title: "Download Started",
+        description: "All attachments are being downloaded as ZIP",
       });
     } else {
+      // Handle JSON response (error case)
+      const data = await response.json();
       toast({
-        title: "No Files",
-        description: "No attachments found for this task",
+        title: "Download Failed",
+        description: data.message || "Could not download attachments",
         variant: "destructive",
       });
     }
@@ -576,22 +585,22 @@ export default function TaskAssignPage() {
                       </td>
                       <td className="p-2 sm:p-3 break-words">
                         {selectedTask.TasksAttachment && selectedTask.TasksAttachment.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id)}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({selectedTask.TasksAttachment.length})
-                            </Button>
-                            <div className="grid gap-1 max-h-20 overflow-y-auto">
-                               {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
-        // Check if it's a GridFS ObjectId or a regular file path
-        const isGridFSFile = isValidObjectId(attachment);
-        const downloadUrl = isGridFSFile 
+  <div className="space-y-2">
+    <Button 
+      type="button" 
+      variant="outline" 
+      size="sm" 
+      className="text-xs"
+      onClick={() => downloadAllAttachments(selectedTask._id)}
+    >
+      <Download className="h-3 w-3 mr-1" />
+      Download All as ZIP ({selectedTask.TasksAttachment.length})
+    </Button>
+    <div className="text-xs text-muted-foreground">Individual files:</div>
+    <div className="grid gap-1 max-h-20 overflow-y-auto">
+      {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
+        const isValidObjectId = /^[0-9a-fA-F]{24}$/.test(attachment);
+        const downloadUrl = isValidObjectId 
           ? `/api/tasks/assign?taskId=${selectedTask._id}&fileId=${attachment}`
           : attachment;
 
@@ -602,6 +611,16 @@ export default function TaskAssignPage() {
             target="_blank"
             rel="noopener noreferrer"
             className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+            onClick={(e) => {
+              if (!isValidObjectId) {
+                e.preventDefault();
+                toast({
+                  title: "Legacy File",
+                  description: "This file is stored in legacy format and cannot be downloaded individually.",
+                  variant: "destructive",
+                });
+              }
+            }}
           >
             <FileText className="h-3 w-3" />
             File {index + 1}
