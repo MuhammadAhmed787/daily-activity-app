@@ -150,7 +150,7 @@ export async function PUT(req: Request) {
 }
 
 /**
- * GET - Create ZIP file in memory for Vercel compatibility
+ * GET - Download files (single or ZIP)
  */
 export async function GET(req: Request) {
   await dbConnect();
@@ -260,9 +260,11 @@ async function downloadSingleFile(fileId: string) {
  */
 async function createZipDownload(task: TaskDoc) {
   try {
+    console.log(`Starting ZIP creation for task: ${task._id}`);
     const gfs = await getGridFS();
     
     if (!mongoose.connection.db) {
+      console.error("No mongoose DB connection available");
       throw new Error("No mongoose DB connection available");
     }
     const db = mongoose.connection.db;
@@ -273,13 +275,16 @@ async function createZipDownload(task: TaskDoc) {
       ...(task.assignmentAttachment ?? []),
     ];
 
+    console.log(`Found ${attachments.length} attachments for task ${task._id}`);
+
     if (attachments.length === 0) {
+      console.log("No attachments available for ZIP");
       return NextResponse.json({ message: "No attachments available" }, { status: 404 });
     }
 
     // Create archiver in memory
     const archive = archiver('zip', {
-      zlib: { level: 9 } // Maximum compression
+      zlib: { level: 5 } // Medium compression to save memory
     });
 
     const chunks: Buffer[] = [];
@@ -294,16 +299,27 @@ async function createZipDownload(task: TaskDoc) {
 
     archive.pipe(writable);
 
+    // Handle archive events
+    archive.on('warning', (err) => {
+      console.warn('Archive warning:', err);
+    });
+
+    archive.on('error', (err) => {
+      console.error('Archive error:', err);
+      throw err;
+    });
+
     let fileCount = 0;
 
     // Add each file to the archive
-    for (const attachment of attachments) {
+    for (const [index, attachment] of attachments.entries()) {
       if (!mongoose.Types.ObjectId.isValid(String(attachment))) {
-        console.warn(`Skipping invalid ObjectId: ${attachment}`);
+        console.warn(`Skipping invalid ObjectId at index ${index}: ${attachment}`);
         continue;
       }
 
       try {
+        console.log(`Processing attachment ${index + 1}/${attachments.length}: ${attachment}`);
         const objId = new mongoose.Types.ObjectId(String(attachment));
         let fileDoc: any = null;
 
@@ -321,6 +337,8 @@ async function createZipDownload(task: TaskDoc) {
           continue;
         }
 
+        console.log(`Found file document: ${fileDoc.filename}, size: ${fileDoc.length} bytes`);
+
         // Get file stream
         const downloadStream = (gfs as any).openDownloadStream
           ? (gfs as any).openDownloadStream(objId)
@@ -336,17 +354,23 @@ async function createZipDownload(task: TaskDoc) {
         await new Promise<void>((resolve, reject) => {
           downloadStream.on("data", (chunk: Buffer) => fileChunks.push(chunk));
           downloadStream.on("end", () => resolve());
-          downloadStream.on("error", (err: any) => reject(err));
+          downloadStream.on("error", (err: any) => {
+            console.error(`Stream error for ${attachment}:`, err);
+            reject(err);
+          });
         });
 
         const fileBuffer = Buffer.concat(fileChunks);
         const fileName = fileDoc.filename || `file-${String(attachment)}`;
         
+        console.log(`Adding file to ZIP: ${fileName}, size: ${fileBuffer.length} bytes`);
+        
         // Add file to archive
         archive.append(fileBuffer, { name: fileName });
         fileCount++;
 
-        console.log(`Added file to ZIP: ${fileName}`);
+        console.log(`Successfully added file ${index + 1} to archive`);
+
       } catch (error) {
         console.error(`Error processing file ${attachment}:`, error);
         continue;
@@ -354,22 +378,32 @@ async function createZipDownload(task: TaskDoc) {
     }
 
     if (fileCount === 0) {
+      console.log("No files were successfully added to the ZIP");
       return NextResponse.json({ message: "No downloadable files found" }, { status: 404 });
     }
+
+    console.log(`Finalizing archive with ${fileCount} files`);
 
     // Finalize the archive
     await archive.finalize();
 
     // Wait for all data to be written
-    await new Promise<void>((resolve) => {
-      writable.on('finish', () => resolve());
+    await new Promise<void>((resolve, reject) => {
+      writable.on('finish', () => {
+        console.log("Writable stream finished");
+        resolve();
+      });
+      writable.on('error', (err) => {
+        console.error("Writable stream error:", err);
+        reject(err);
+      });
     });
 
     // Combine all chunks into single buffer
     const zipBuffer = Buffer.concat(chunks);
     const zipFileName = `task-${task.code || task._id}-attachments.zip`;
 
-    console.log(`Created ZIP file: ${zipFileName} with ${fileCount} files, size: ${zipBuffer.length} bytes`);
+    console.log(`Created ZIP file: ${zipFileName} with ${fileCount} files, total ZIP size: ${zipBuffer.length} bytes`);
 
     return new Response(zipBuffer, {
       headers: {
@@ -380,9 +414,10 @@ async function createZipDownload(task: TaskDoc) {
     });
   } catch (error: any) {
     console.error("Error creating ZIP file:", error);
+    console.error("Error stack:", error.stack);
     return NextResponse.json({ 
       message: "Failed to create ZIP file", 
-      error: error?.message ?? String(error) 
+      error: error?.message ?? String(error)
     }, { status: 500 });
   }
 }
