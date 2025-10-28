@@ -270,91 +270,79 @@ export default function TaskAssignPage() {
   const removeFile = (index: number) => {
     setFiles(prev => prev.filter((_, i) => i !== index))
   }
+
 const downloadAllAttachments = async (taskId: string) => {
   try {
     setIsDownloading(true);
-    console.log("Starting download for task:", taskId);
     
-    const response = await fetch(`/api/tasks/assign?taskId=${taskId}`);
+    // First, get the list of files
+    const listResponse = await fetch(`/api/tasks/assign?taskId=${taskId}`);
     
-    if (!response.ok) {
-      // Handle timeout and size limit errors gracefully
-      if (response.status === 408 || response.status === 413) {
-        const errorData = await response.json();
-        toast({
-          title: "Large Files Detected",
-          description: errorData.message || "Files are too large for ZIP download. Downloading files individually...",
-          variant: "default",
-        });
-        
-        // Fallback: Download files individually
-        await downloadFilesIndividually(taskId);
-        return;
-      }
-      
-      const errorText = await response.text();
-      console.error("Server response not OK:", response.status, errorText);
-      
-      try {
-        const errorData = JSON.parse(errorText);
-        toast({
-          title: "Download Failed",
-          description: errorData.message || `Server error: ${response.status}`,
-          variant: "destructive",
-        });
-      } catch (e) {
-        toast({
-          title: "Download Failed",
-          description: `Server error: ${response.status}`,
-          variant: "destructive",
-        });
-      }
+    if (!listResponse.ok) {
+      const errorData = await listResponse.json().catch(() => ({ message: "Unknown error" }));
+      throw new Error(errorData.message || `Failed to get file list: ${listResponse.status}`);
+    }
+
+    const listData = await listResponse.json();
+    
+    if (!listData.files || listData.files.length === 0) {
+      toast({
+        title: "No Files",
+        description: "No attachments found for this task",
+        variant: "destructive",
+      });
       return;
     }
 
-    // Check if response is ZIP
-    const contentType = response.headers.get('content-type');
-    console.log("Content-Type:", contentType);
+    toast({
+      title: "Starting Downloads",
+      description: `Downloading ${listData.files.length} files individually...`,
+    });
+
+    // Download each file individually
+    let successCount = 0;
     
-    if (contentType === 'application/zip') {
-      const blob = await response.blob();
-      console.log("Blob size:", blob.size);
-      
-      if (blob.size === 0) {
-        throw new Error("Received empty ZIP file");
-      }
-      
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      
-      // Get filename from Content-Disposition header or use default
-      const contentDisposition = response.headers.get('content-disposition');
-      let filename = `task-${taskId}-attachments.zip`;
-      if (contentDisposition) {
-        const filenameMatch = contentDisposition.match(/filename="(.+)"/);
-        if (filenameMatch) {
-          filename = filenameMatch[1];
+    for (const file of listData.files) {
+      try {
+        if (!file.isValidObjectId) {
+          console.warn(`Skipping invalid file: ${file.id}`);
+          continue;
         }
+
+        const fileResponse = await fetch(file.downloadUrl);
+        
+        if (fileResponse.ok) {
+          const blob = await fileResponse.blob();
+          const url = window.URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = file.name;
+          document.body.appendChild(a);
+          a.click();
+          window.URL.revokeObjectURL(url);
+          document.body.removeChild(a);
+          
+          successCount++;
+          
+          // Small delay between downloads to avoid browser issues
+          await new Promise(resolve => setTimeout(resolve, 300));
+        } else {
+          console.warn(`Failed to download file: ${file.name}`);
+        }
+      } catch (fileError) {
+        console.error(`Error downloading file ${file.name}:`, fileError);
       }
-      
-      a.download = filename;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-      
+    }
+
+    if (successCount > 0) {
       toast({
-        title: "Download Complete!",
-        description: `All attachments have been downloaded as ${filename}`,
+        title: "Downloads Complete",
+        description: `Successfully downloaded ${successCount} out of ${listData.files.length} files`,
       });
     } else {
-      // Handle case where server returns JSON instead of ZIP
-      const data = await response.json();
-      console.error("Server returned JSON instead of ZIP:", data);
       toast({
         title: "Download Failed",
-        description: data.message || "Server returned an unexpected response",
+        description: "Could not download any files",
         variant: "destructive",
       });
     }
@@ -362,7 +350,7 @@ const downloadAllAttachments = async (taskId: string) => {
     console.error("Error downloading attachments:", error);
     toast({
       title: "Download Failed",
-      description: error instanceof Error ? error.message : "Could not download attachments. Please try again.",
+      description: error instanceof Error ? error.message : "Could not download attachments",
       variant: "destructive",
     });
   } finally {
@@ -688,20 +676,20 @@ const downloadFilesIndividually = async (taskId: string) => {
                         {selectedTask.TasksAttachment && selectedTask.TasksAttachment.length > 0 ? (
                           <div className="space-y-2">
                             <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id)}
-                              disabled={isDownloading}
-                            >
-                              {isDownloading ? (
-                                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                              ) : (
-                                <Download className="h-3 w-3 mr-1" />
-                              )}
-                              {isDownloading ? "Downloading..." : `Download All as ZIP (${selectedTask.TasksAttachment.length})`}
-                            </Button>
+  type="button" 
+  variant="outline" 
+  size="sm" 
+  className="text-xs"
+  onClick={() => downloadAllAttachments(selectedTask._id)}
+  disabled={isDownloading}
+>
+  {isDownloading ? (
+    <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+  ) : (
+    <Download className="h-3 w-3 mr-1" />
+  )}
+  {isDownloading ? "Downloading..." : `Download All (${selectedTask.TasksAttachment.length})`}
+</Button>
                             <div className="text-xs text-muted-foreground">Click individual files to download them separately:</div>
                             <div className="grid gap-1 max-h-20 overflow-y-auto">
                               {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
