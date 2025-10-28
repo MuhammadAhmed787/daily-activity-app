@@ -4,10 +4,6 @@ import dbConnect from "@/lib/db";
 import Task from "@/models/Task";
 import "@/models/CompanyInformation";
 import CompanyInformation from "@/models/CompanyInformation";
-import { mkdir, readFile } from "fs/promises";
-import { createWriteStream, existsSync } from "fs";
-import path from "path";
-import archiver from "archiver";
 import { getGridFS } from "@/lib/gridfs";
 import mongoose from "mongoose";
 
@@ -23,8 +19,8 @@ interface TaskDoc {
   _id?: string;
   code?: string;
   company?: { id?: string } | null;
-  TasksAttachment?: string[]; // legacy saved file paths or GridFS ids
-  assignmentAttachment?: string[]; // GridFS ids saved by this endpoint
+  TasksAttachment?: string[];
+  assignmentAttachment?: string[];
 }
 
 /**
@@ -114,8 +110,7 @@ export async function PUT(req: Request) {
         : null;
 
       if (!uploadStream) {
-        // getGridFS didn't supply openUploadStream — fatal for uploads
-        throw new Error("GridFS upload not available (getGridFS returned unexpected object).");
+        throw new Error("GridFS upload not available");
       }
 
       await new Promise<void>((resolve, reject) => {
@@ -125,7 +120,6 @@ export async function PUT(req: Request) {
       });
 
       uploadedIds.push(String(uploadStream.id));
-      console.log("Uploaded to GridFS:", uploadStream.id?.toString?.() ?? uploadStream.id, name);
     }
 
     const updateData: any = {
@@ -155,7 +149,7 @@ export async function PUT(req: Request) {
 }
 
 /**
- * GET - create a ZIP of all attachments for a given taskId
+ * GET - Stream individual files instead of creating ZIP (Vercel-compatible)
  */
 export async function GET(req: Request) {
   await dbConnect();
@@ -163,10 +157,13 @@ export async function GET(req: Request) {
   try {
     const { searchParams } = new URL(req.url);
     const taskId = searchParams.get("taskId");
+    const fileId = searchParams.get("fileId"); // For direct file download
+    const downloadAll = searchParams.get("downloadAll"); // For downloading all files
 
     if (!taskId) {
       return NextResponse.json({ message: "taskId is required" }, { status: 400 });
     }
+
     if (!mongoose.Types.ObjectId.isValid(taskId)) {
       return NextResponse.json({ message: "Invalid taskId" }, { status: 400 });
     }
@@ -176,104 +173,172 @@ export async function GET(req: Request) {
       return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
 
-    const zipFileName = `task-${task.code ?? taskId}-attachments.zip`;
-    const tmpDir = path.join(process.cwd(), "tmp");
-    const zipFilePath = path.join(tmpDir, zipFileName);
-
-    await mkdir(tmpDir, { recursive: true });
-
-    const output = createWriteStream(zipFilePath);
-    const archive = archiver("zip", { zlib: { level: 9 } });
-
-    archive.pipe(output);
-
-    const gfs = await getGridFS();
-
-    // --- SAFETY: ensure mongoose.connection.db exists before using ---
-    if (!mongoose.connection.db) {
-      // This should not happen if dbConnect() resolved successfully, but guard to satisfy TS and runtime safety
-      throw new Error("No mongoose DB connection available (mongoose.connection.db is undefined).");
+    // If specific file ID is provided, download that single file
+    if (fileId) {
+      return await downloadSingleFile(fileId);
     }
-    const db = mongoose.connection.db; // after guard, TS knows this is defined
 
-    // Collect attachments from legacy and new fields
+    // If downloadAll is requested, provide a list of files with download links
+    if (downloadAll) {
+      return await getFileListResponse(task);
+    }
+
+    // Default behavior: download the first available file or return file list
+    return await getFileListResponse(task);
+  } catch (error: any) {
+    console.error("Error handling file download:", error);
+    return NextResponse.json({ message: "Failed to handle file download", error: error?.message ?? String(error) }, { status: 500 });
+  }
+}
+
+/**
+ * Download a single file by GridFS ID
+ */
+async function downloadSingleFile(fileId: string) {
+  try {
+    const gfs = await getGridFS();
+    
+    if (!mongoose.Types.ObjectId.isValid(fileId)) {
+      return NextResponse.json({ message: "Invalid file ID" }, { status: 400 });
+    }
+
+    const objId = new mongoose.Types.ObjectId(fileId);
+    let fileDoc: any = null;
+
+    // Find file metadata
+    if (!mongoose.connection.db) {
+      throw new Error("No mongoose DB connection available");
+    }
+    const db = mongoose.connection.db;
+
+    try {
+      if (typeof (gfs as any).find === "function") {
+        const files = await (gfs as any).find({ _id: objId }).toArray();
+        fileDoc = files && files.length > 0 ? files[0] : null;
+      } else {
+        const files = await db.collection("fs.files").find({ _id: objId }).toArray();
+        fileDoc = files && files.length > 0 ? files[0] : null;
+      }
+    } catch (err) {
+      console.warn("Failed to lookup GridFS metadata:", err);
+    }
+
+    if (!fileDoc) {
+      return NextResponse.json({ message: "File not found" }, { status: 404 });
+    }
+
+    // Create download stream
+    const downloadStream = (gfs as any).openDownloadStream
+      ? (gfs as any).openDownloadStream(objId)
+      : null;
+
+    if (!downloadStream) {
+      return NextResponse.json({ message: "File stream not available" }, { status: 500 });
+    }
+
+    // Collect stream data
+    const chunks: Buffer[] = [];
+    await new Promise<void>((resolve, reject) => {
+      downloadStream.on("data", (chunk: Buffer) => chunks.push(chunk));
+      downloadStream.on("end", () => resolve());
+      downloadStream.on("error", (err: any) => reject(err));
+    });
+
+    const fileBuffer = Buffer.concat(chunks);
+    const fileName = fileDoc.filename || `file-${fileId}`;
+
+    return new Response(fileBuffer, {
+      headers: {
+        "Content-Type": fileDoc.contentType || "application/octet-stream",
+        "Content-Disposition": `attachment; filename="${fileName}"`,
+        "Content-Length": fileBuffer.length.toString(),
+      },
+    });
+  } catch (error: any) {
+    console.error("Error downloading single file:", error);
+    return NextResponse.json({ message: "Failed to download file" }, { status: 500 });
+  }
+}
+
+/**
+ * Get a list of all files with download links
+ */
+async function getFileListResponse(task: TaskDoc) {
+  try {
+    const gfs = await getGridFS(); // Add this line to fix the error
+
     const attachments: string[] = [
       ...(task.TasksAttachment ?? []),
       ...(task.assignmentAttachment ?? []),
     ];
 
     if (attachments.length === 0) {
-      archive.append("No attachments available", { name: "README.txt" });
-    } else {
-      for (const attachment of attachments) {
-        if (!attachment) continue;
+      return NextResponse.json({ 
+        message: "No attachments available",
+        files: []
+      });
+    }
 
-        if (mongoose.Types.ObjectId.isValid(String(attachment))) {
+    if (!mongoose.connection.db) {
+      throw new Error("No mongoose DB connection available");
+    }
+    const db = mongoose.connection.db;
+
+    // Get file information for each attachment
+    const filesInfo = await Promise.all(
+      attachments.map(async (attachment) => {
+        if (!mongoose.Types.ObjectId.isValid(String(attachment))) {
+          return {
+            id: attachment,
+            name: `file-${attachment}`,
+            type: "unknown",
+            size: 0,
+            downloadUrl: `/api/tasks/assign?taskId=${task._id}&fileId=${attachment}`
+          };
+        }
+
+        try {
           const objId = new mongoose.Types.ObjectId(String(attachment));
           let fileDoc: any = null;
 
-          try {
-            if (typeof (gfs as any).find === "function") {
-              const files = await (gfs as any).find({ _id: objId }).toArray();
-              if (files && files.length > 0) fileDoc = files[0];
-            } else {
-              // Use db.collection('fs.files') safely — db is not undefined thanks to guard above
-              const files = await db.collection("fs.files").find({ _id: objId }).toArray();
-              if (files && files.length > 0) fileDoc = files[0];
-            }
-          } catch (err) {
-            console.warn("Failed to lookup GridFS metadata:", err);
-          }
-
-          try {
-            const downloadStream = (gfs as any).openDownloadStream
-              ? (gfs as any).openDownloadStream(objId)
-              : null;
-
-            if (!downloadStream) {
-              console.warn("GridFS download stream not available for id:", String(attachment));
-              continue;
-            }
-
-            const safeName = fileDoc?.filename ? path.basename(fileDoc.filename) : `file-${String(attachment)}`;
-            archive.append(downloadStream, { name: safeName });
-            console.log("Added GridFS file to archive:", safeName);
-          } catch (err) {
-            console.warn("Failed to append GridFS file to archive:", attachment, err);
-          }
-        } else {
-          const relative = String(attachment).replace(/^\/+/, "");
-          const filePath = path.join(process.cwd(), "public", relative);
-          if (existsSync(filePath)) {
-            archive.file(filePath, { name: path.basename(filePath) });
-            console.log("Added public file to archive:", filePath);
+          if (typeof (gfs as any).find === "function") {
+            const files = await (gfs as any).find({ _id: objId }).toArray();
+            fileDoc = files && files.length > 0 ? files[0] : null;
           } else {
-            console.warn("Public attachment not found, skipping:", filePath);
+            const files = await db.collection("fs.files").find({ _id: objId }).toArray();
+            fileDoc = files && files.length > 0 ? files[0] : null;
           }
+
+          return {
+            id: String(attachment),
+            name: fileDoc?.filename || `file-${attachment}`,
+            type: fileDoc?.contentType || "unknown",
+            size: fileDoc?.length || 0,
+            downloadUrl: `/api/tasks/assign?taskId=${task._id}&fileId=${attachment}`
+          };
+        } catch (error) {
+          console.error("Error getting file info:", error);
+          return {
+            id: String(attachment),
+            name: `file-${attachment}`,
+            type: "unknown",
+            size: 0,
+            downloadUrl: `/api/tasks/assign?taskId=${task._id}&fileId=${attachment}`
+          };
         }
-      }
-    }
+      })
+    );
 
-    await archive.finalize();
-
-    await new Promise<void>((resolve, reject) => {
-      output.on("close", () => resolve());
-      output.on("end", () => resolve());
-      output.on("error", (err) => reject(err));
-    });
-
-    const zipBuffer = await readFile(zipFilePath);
-    const uint8Array = new Uint8Array(zipBuffer);
-
-    return new Response(uint8Array, {
-      headers: {
-        "Content-Type": "application/zip",
-        "Content-Disposition": `attachment; filename="${zipFileName}"`,
-        "Content-Length": uint8Array.length.toString(),
-      },
+    return NextResponse.json({
+      message: "Files retrieved successfully",
+      taskCode: task.code,
+      files: filesInfo
     });
   } catch (error: any) {
-    console.error("Error creating zip file:", error);
-    return NextResponse.json({ message: "Failed to create zip file", error: error?.message ?? String(error) }, { status: 500 });
+    console.error("Error in getFileListResponse:", error);
+    return NextResponse.json({ 
+      message: "Failed to get file list", 
+      error: error?.message ?? String(error) 
+    }, { status: 500 });
   }
 }
