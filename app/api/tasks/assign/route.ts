@@ -1,73 +1,134 @@
-import { NextResponse } from "next/server"
-import dbConnect from "@/lib/db"
-import Task from "@/models/Task"
-import CompanyInformation from "@/models/CompanyInformation"
-import { writeFile, mkdir, readFile } from "fs/promises"
-import path from "path"
-import { v4 as uuidv4 } from "uuid"
-import archiver from "archiver"
-import { createWriteStream, existsSync } from "fs"
+// app/api/tasks/assign/route.ts
+import { NextResponse } from "next/server";
+import dbConnect from "@/lib/db";
+import Task from "@/models/Task";
+import "@/models/CompanyInformation";
+import CompanyInformation from "@/models/CompanyInformation";
+import { mkdir, readFile } from "fs/promises";
+import { createWriteStream, existsSync } from "fs";
+import path from "path";
+import archiver from "archiver";
+import { getGridFS } from "@/lib/gridfs";
+import mongoose from "mongoose";
 
+/**
+ * Minimal interfaces
+ */
+interface CompanyDoc {
+  _id?: string;
+  softwareInformation?: { softwareType?: string }[];
+}
+
+interface TaskDoc {
+  _id?: string;
+  code?: string;
+  company?: { id?: string } | null;
+  TasksAttachment?: string[]; // legacy saved file paths or GridFS ids
+  assignmentAttachment?: string[]; // GridFS ids saved by this endpoint
+}
+
+/**
+ * PUT - assign task and upload files to GridFS
+ */
 export async function PUT(req: Request) {
-  await dbConnect()
+  await dbConnect();
 
   try {
-    const formData = await req.formData()
-    console.log("Received form data fields:")
-    for (const [key, value] of formData.entries()) {
-      console.log(`${key}: ${value instanceof File ? `File (${value.name}, ${value.size} bytes)` : value}`)
-    }
+    const formData = await req.formData();
 
-    const taskId = formData.get("taskId") as string
-    const userId = formData.get("userId") as string
-    const username = formData.get("username") as string
-    const name = formData.get("name") as string
-    const roleName = formData.get("roleName") as string
-    const assignedDate = formData.get("assignedDate") as string
-    const remarks = formData.get("remarks") as string
-    const files = formData.getAll("files") as File[]
+    const taskId = (formData.get("taskId") as string) || "";
+    const userId = (formData.get("userId") as string) || "";
+    const username = (formData.get("username") as string) || "";
+    const name = (formData.get("name") as string) || "";
+    const roleName = (formData.get("roleName") as string) || "";
+    const assignedDateRaw = (formData.get("assignedDate") as string) || "";
+    const remarks = (formData.get("remarks") as string) || "";
 
-    // Validate required fields
     if (!taskId || !userId) {
-      return NextResponse.json({ message: "taskId and userId are required" }, { status: 400 })
+      return NextResponse.json({ message: "taskId and userId are required" }, { status: 400 });
     }
 
-    // Process multiple files
-    const filePaths: string[] = []
-    for (const file of files) {
-      if (file && file.size > 0) {
-        const bytes = await file.arrayBuffer()
-        const buffer = Buffer.from(bytes)
-        const ext = path.extname(file.name)
-        const filename = `${uuidv4()}${ext}`
-        const filePath = `/uploads/tasks/${filename}`
-        const fullPath = path.join(process.cwd(), "public", filePath)
-        
-        await mkdir(path.dirname(fullPath), { recursive: true })
-        await writeFile(fullPath, buffer)
-        filePaths.push(filePath)
-        console.log("File saved at:", fullPath)
-      }
-    }
+    const files = formData.getAll("files") as File[];
 
-    // Find task to verify it exists and get company info
-    const task = await Task.findById(taskId)
+    const task = await Task.findById(taskId).lean<TaskDoc | null>();
     if (!task) {
-      console.error("Task not found:", taskId)
-      return NextResponse.json({ message: "Task not found" }, { status: 404 })
+      return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
 
-    // Get company information to extract software type
-    let softwareType = "N/A"
-    if (task.company && task.company.id) {
-      const companyInfo = await CompanyInformation.findById(task.company.id)
-      if (companyInfo && companyInfo.softwareInformation && companyInfo.softwareInformation.length > 0) {
-        softwareType = companyInfo.softwareInformation[0].softwareType || "N/A"
+    let softwareType = "N/A";
+    if (task.company?.id) {
+      try {
+        const companyInfo = await CompanyInformation.findById(String(task.company.id)).lean<CompanyDoc | null>();
+        softwareType = companyInfo?.softwareInformation?.[0]?.softwareType ?? "N/A";
+      } catch (err) {
+        console.warn("Company lookup failed:", err);
       }
     }
 
-    // Update data
-    const updateData = {
+    const gfs = await getGridFS();
+    const uploadedIds: string[] = [];
+
+    const allowedTypes = [
+      "application/pdf",
+      "image/jpeg",
+      "image/png",
+      "image/gif",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+      "application/vnd.ms-excel",
+      "application/msword",
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ];
+    const allowedExts = ["pdf", "jpg", "jpeg", "png", "gif", "xlsx", "xls", "doc", "docx"];
+
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (!file || file.size === 0) continue;
+
+      const name = file.name || `file_${Date.now()}_${i}`;
+      const ext = name.split(".").pop()?.toLowerCase() || "";
+      const allowedByExt = allowedExts.includes(ext);
+
+      if (!allowedTypes.includes(file.type) && !allowedByExt) {
+        console.warn("Blocked file (disallowed type):", name, file.type);
+        continue;
+      }
+
+      if (file.size > 10 * 1024 * 1024) {
+        console.warn("Skipped file (too large):", name, file.size);
+        continue;
+      }
+
+      const bytes = await file.arrayBuffer();
+      const buffer = Buffer.from(bytes);
+
+      const uploadStream = (gfs as any).openUploadStream
+        ? (gfs as any).openUploadStream(name, {
+            contentType: file.type || undefined,
+            metadata: {
+              originalName: name,
+              uploadedAt: new Date(),
+              uploadedBy: userId,
+              relatedTask: taskId,
+            },
+          })
+        : null;
+
+      if (!uploadStream) {
+        // getGridFS didn't supply openUploadStream — fatal for uploads
+        throw new Error("GridFS upload not available (getGridFS returned unexpected object).");
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.end(buffer);
+        uploadStream.on("finish", () => resolve());
+        uploadStream.on("error", (err: any) => reject(err));
+      });
+
+      uploadedIds.push(String(uploadStream.id));
+      console.log("Uploaded to GridFS:", uploadStream.id?.toString?.() ?? uploadStream.id, name);
+    }
+
+    const updateData: any = {
       assigned: true,
       approved: true,
       assignedTo: {
@@ -76,102 +137,143 @@ export async function PUT(req: Request) {
         name,
         role: { name: roleName },
       },
-      assignedDate: new Date(assignedDate),
+      assignedDate: assignedDateRaw ? new Date(assignedDateRaw) : new Date(),
       assignmentRemarks: remarks || "",
-      assignmentAttachment: filePaths,
+      assignmentAttachment: uploadedIds,
       status: "assigned",
       approvedAt: new Date(),
-      softwareType: softwareType // Add software type to task
-    }
+      softwareType,
+    };
 
-    console.log("Updating task with data:", updateData)
+    const updatedTask = await Task.findByIdAndUpdate(taskId, { $set: updateData }, { new: true, runValidators: true }).lean();
 
-    // Perform update
-    const updatedTask = await Task.findByIdAndUpdate(
-      taskId,
-      { $set: updateData },
-      { new: true, runValidators: true }
-    ).lean()
-
-    console.log("Task after update:", updatedTask)
-
-    return NextResponse.json(updatedTask)
+    return NextResponse.json(updatedTask);
   } catch (error: any) {
-    console.error("Error assigning task:", error)
-    return NextResponse.json(
-      { message: "Failed to assign task", error: error.message },
-      { status: 500 }
-    )
+    console.error("Error assigning task:", error);
+    return NextResponse.json({ message: "Failed to assign task", error: error?.message ?? String(error) }, { status: 500 });
   }
 }
 
-// New endpoint to download all attachments as zip
+/**
+ * GET - create a ZIP of all attachments for a given taskId
+ */
 export async function GET(req: Request) {
-  await dbConnect()
-  
+  await dbConnect();
+
   try {
-    const { searchParams } = new URL(req.url)
-    const taskId = searchParams.get('taskId')
-    
+    const { searchParams } = new URL(req.url);
+    const taskId = searchParams.get("taskId");
+
     if (!taskId) {
-      return NextResponse.json({ message: "taskId is required" }, { status: 400 })
+      return NextResponse.json({ message: "taskId is required" }, { status: 400 });
     }
-    
-    const task = await Task.findById(taskId)
+    if (!mongoose.Types.ObjectId.isValid(taskId)) {
+      return NextResponse.json({ message: "Invalid taskId" }, { status: 400 });
+    }
+
+    const task = await Task.findById(taskId).lean<TaskDoc | null>();
     if (!task) {
-      return NextResponse.json({ message: "Task not found" }, { status: 404 })
+      return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
-    
-    // Create a zip file containing all attachments
-    const zipFileName = `task-${task.code}-attachments.zip`
-    const zipFilePath = path.join(process.cwd(), 'tmp', zipFileName)
-    
-    // Ensure tmp directory exists
-    await mkdir(path.dirname(zipFilePath), { recursive: true })
-    
-    const output = createWriteStream(zipFilePath)
-    const archive = archiver('zip', {
-      zlib: { level: 9 }
-    })
-    
-    archive.pipe(output)
-    
-    // Add all task attachments to the zip
-    if (task.TasksAttachment && task.TasksAttachment.length > 0) {
-      for (const attachment of task.TasksAttachment) {
-        const filePath = path.join(process.cwd(), 'public', attachment)
-        if (existsSync(filePath)) {
-          archive.file(filePath, { name: path.basename(attachment) })
+
+    const zipFileName = `task-${task.code ?? taskId}-attachments.zip`;
+    const tmpDir = path.join(process.cwd(), "tmp");
+    const zipFilePath = path.join(tmpDir, zipFileName);
+
+    await mkdir(tmpDir, { recursive: true });
+
+    const output = createWriteStream(zipFilePath);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+
+    archive.pipe(output);
+
+    const gfs = await getGridFS();
+
+    // --- SAFETY: ensure mongoose.connection.db exists before using ---
+    if (!mongoose.connection.db) {
+      // This should not happen if dbConnect() resolved successfully, but guard to satisfy TS and runtime safety
+      throw new Error("No mongoose DB connection available (mongoose.connection.db is undefined).");
+    }
+    const db = mongoose.connection.db; // after guard, TS knows this is defined
+
+    // Collect attachments from legacy and new fields
+    const attachments: string[] = [
+      ...(task.TasksAttachment ?? []),
+      ...(task.assignmentAttachment ?? []),
+    ];
+
+    if (attachments.length === 0) {
+      archive.append("No attachments available", { name: "README.txt" });
+    } else {
+      for (const attachment of attachments) {
+        if (!attachment) continue;
+
+        if (mongoose.Types.ObjectId.isValid(String(attachment))) {
+          const objId = new mongoose.Types.ObjectId(String(attachment));
+          let fileDoc: any = null;
+
+          try {
+            if (typeof (gfs as any).find === "function") {
+              const files = await (gfs as any).find({ _id: objId }).toArray();
+              if (files && files.length > 0) fileDoc = files[0];
+            } else {
+              // Use db.collection('fs.files') safely — db is not undefined thanks to guard above
+              const files = await db.collection("fs.files").find({ _id: objId }).toArray();
+              if (files && files.length > 0) fileDoc = files[0];
+            }
+          } catch (err) {
+            console.warn("Failed to lookup GridFS metadata:", err);
+          }
+
+          try {
+            const downloadStream = (gfs as any).openDownloadStream
+              ? (gfs as any).openDownloadStream(objId)
+              : null;
+
+            if (!downloadStream) {
+              console.warn("GridFS download stream not available for id:", String(attachment));
+              continue;
+            }
+
+            const safeName = fileDoc?.filename ? path.basename(fileDoc.filename) : `file-${String(attachment)}`;
+            archive.append(downloadStream, { name: safeName });
+            console.log("Added GridFS file to archive:", safeName);
+          } catch (err) {
+            console.warn("Failed to append GridFS file to archive:", attachment, err);
+          }
+        } else {
+          const relative = String(attachment).replace(/^\/+/, "");
+          const filePath = path.join(process.cwd(), "public", relative);
+          if (existsSync(filePath)) {
+            archive.file(filePath, { name: path.basename(filePath) });
+            console.log("Added public file to archive:", filePath);
+          } else {
+            console.warn("Public attachment not found, skipping:", filePath);
+          }
         }
       }
     }
-    
-    await archive.finalize()
-    
-    // Wait for the file to be completely written
-    await new Promise<void>((resolve) => {
-      output.on('close', () => resolve());
+
+    await archive.finalize();
+
+    await new Promise<void>((resolve, reject) => {
+      output.on("close", () => resolve());
+      output.on("end", () => resolve());
+      output.on("error", (err) => reject(err));
     });
-    
-    // Read the zip file into a buffer
-    const zipBuffer = await readFile(zipFilePath)
-    
-    // Convert the buffer to a Uint8Array which is compatible with Blob
-    const uint8Array = new Uint8Array(zipBuffer)
-    
-    // Return the blob as a response
+
+    const zipBuffer = await readFile(zipFilePath);
+    const uint8Array = new Uint8Array(zipBuffer);
+
     return new Response(uint8Array, {
       headers: {
-        'Content-Type': 'application/zip',
-        'Content-Disposition': `attachment; filename="${zipFileName}"`,
-        'Content-Length': uint8Array.length.toString(),
-      }
-    })
+        "Content-Type": "application/zip",
+        "Content-Disposition": `attachment; filename="${zipFileName}"`,
+        "Content-Length": uint8Array.length.toString(),
+      },
+    });
   } catch (error: any) {
-    console.error("Error creating zip file:", error)
-    return NextResponse.json(
-      { message: "Failed to create zip file", error: error.message },
-      { status: 500 }
-    )
+    console.error("Error creating zip file:", error);
+    return NextResponse.json({ message: "Failed to create zip file", error: error?.message ?? String(error) }, { status: 500 });
   }
 }
