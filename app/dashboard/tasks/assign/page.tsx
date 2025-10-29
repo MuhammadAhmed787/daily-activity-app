@@ -437,6 +437,20 @@ const downloadFilesIndividually = async (taskId: string) => {
     }
   }
 
+    // ADD DEBUGGING HERE:
+  console.log("🔄 Starting file upload process...");
+  console.log("📁 Total files to upload:", files.length);
+  files.forEach((file, index) => {
+    console.log(`File ${index + 1}:`, {
+      name: file.name,
+      type: file.type,
+      size: file.size,
+      extension: file.name.split('.').pop()
+    });
+  });
+
+  setIsAssigning(true)
+
   const getPriorityBadge = (priority: string) => {
     switch (priority) {
       case "Urgent":
@@ -819,7 +833,7 @@ const downloadFilesIndividually = async (taskId: string) => {
                           id="files"
                           type="file"
                           multiple
-                          accept=".pdf,.jpg,.jpeg,.png,.xlsx,.xls,.doc,.docx,.txt.csv,.json"
+                          accept=".pdf,.jpg,.jpeg,.png,.xlsx,.xls,.doc,.docx,.txt,.csv,.json"
                           onChange={handleFileChange}
                           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                         />
