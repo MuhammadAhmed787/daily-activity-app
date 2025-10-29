@@ -72,8 +72,17 @@ export async function PUT(req: Request) {
       "application/vnd.ms-excel",
       "application/msword",
       "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "text/plain", // Added text/plain
+      "text/csv", // Added CSV files
+      "application/json", // Added JSON files
     ];
-    const allowedExts = ["pdf", "jpg", "jpeg", "png", "gif", "xlsx", "xls", "doc", "docx"];
+    // Updated allowed extensions to include text files
+    const allowedExts = [
+      "pdf", "jpg", "jpeg", "png", "gif", 
+      "xlsx", "xls", "doc", "docx",
+      "txt", "csv", "json" // Added text file extensions
+    ];
+
 
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
