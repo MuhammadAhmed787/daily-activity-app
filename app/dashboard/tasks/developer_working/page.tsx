@@ -76,31 +76,88 @@ const calculateElapsedTime = (startDate: string, endDate: string) => {
   return `${days}d ${hours}h ${minutes}m`;
 };
 
-  // Download all attachments as a zip file
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    try {
-      const zip = new JSZip();
-      const folder = zip.folder(`${type}-attachments-${taskId}`);
+// Download all attachments as a zip file
+const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  try {
+    const zip = new JSZip();
+    const folder = zip.folder(`${type}-attachments-${taskId}`);
+    
+    let successCount = 0;
+    
+    for (let i = 0; i < attachments.length; i++) {
+      const attachment = attachments[i];
       
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        const response = await fetch(attachment);
-        const blob = await response.blob();
-        const fileName = attachment.split('/').pop() || `file-${i}`;
-        folder?.file(fileName, blob);
+      // Handle both relative and absolute URLs
+      let fileUrl = attachment;
+      
+      // If it's a relative path (starts with /), make it absolute
+      if (attachment.startsWith('/')) {
+        fileUrl = `${window.location.origin}${attachment}`;
+      }
+      // If it's a GridFS ObjectId, use the API endpoint
+      else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+        fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
       }
       
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `${type}-attachments-${taskId}.zip`);
-    } catch (error) {
-      console.error("Error downloading attachments:", error);
+      try {
+        console.log(`Downloading file: ${fileUrl}`);
+        const response = await fetch(fileUrl);
+        
+        if (response.ok) {
+          const blob = await response.blob();
+          
+          // Get filename from response headers or use a default name
+          let fileName = `file-${i + 1}`;
+          const contentDisposition = response.headers.get('content-disposition');
+          if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+            if (filenameMatch) {
+              fileName = filenameMatch[1];
+            }
+          } else {
+            // Try to extract filename from URL
+            const urlParts = fileUrl.split('/');
+            const lastPart = urlParts[urlParts.length - 1];
+            if (lastPart && lastPart.includes('.')) {
+              fileName = lastPart;
+            }
+          }
+          
+          folder?.file(fileName, blob);
+          successCount++;
+        } else {
+          console.warn(`Failed to download file: ${fileUrl}, status: ${response.status}`);
+        }
+      } catch (fileError) {
+        console.error(`Error downloading file ${fileUrl}:`, fileError);
+      }
+    }
+    
+    if (successCount === 0) {
       toast({
-        title: "Download Error",
-        description: "Failed to download attachments. Please try again.",
+        title: "Download Failed",
+        description: "Could not download any files",
         variant: "destructive",
       });
+      return;
     }
-  };
+    
+    const content = await zip.generateAsync({ type: "blob" });
+    saveAs(content, `${type}-attachments-${taskId}.zip`);
+    
+    toast({
+      title: "Download Complete",
+      description: `Downloaded ${successCount} files as ZIP`,
+    });
+  } catch (error) {
+    console.error("Error downloading attachments:", error);
+    toast({
+      title: "Download Error",
+      description: "Failed to download attachments. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
 
   // Handle file selection for multiple attachments
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>, setter: React.Dispatch<React.SetStateAction<File[]>>) => {
@@ -640,75 +697,107 @@ const calculateElapsedTime = (startDate: string, endDate: string) => {
                       </td>
                     </tr>
                     <tr>
-                      <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
-                        <Paperclip className="h-3 w-3 text-gray-500" /> Task Attachments
-                      </td>
-                      <td className="p-2 sm:p-3 break-words">
-                        {selectedTask.TasksAttachment && Array.isArray(selectedTask.TasksAttachment) && selectedTask.TasksAttachment.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, selectedTask.TasksAttachment || [], 'task')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({selectedTask.TasksAttachment.length})
-                            </Button>
-                            <div className="grid gap-1 max-h-20 overflow-y-auto">
-                              {selectedTask.TasksAttachment.map((attachment: string, index: number) => (
-                                <a 
-                                  key={index}
-                                  href={attachment} 
-                                  target="_blank" 
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                                >
-                                  <FileText className="h-3 w-3" />
-                                  File {index + 1}
-                                </a>
-                              ))}
-                            </div>
-                          </div>
-                        ) : "None"}
-                      </td>
-                    </tr>
+  <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
+    <Paperclip className="h-3 w-3 text-gray-500" /> Task Attachments
+  </td>
+  <td className="p-2 sm:p-3 break-words">
+    {selectedTask.TasksAttachment && Array.isArray(selectedTask.TasksAttachment) && selectedTask.TasksAttachment.length > 0 ? (
+      <div className="space-y-2">
+        <Button 
+          type="button" 
+          variant="outline" 
+          size="sm" 
+          className="text-xs"
+          onClick={() => downloadAllAttachments(selectedTask._id, selectedTask.TasksAttachment || [], 'task')}
+        >
+          <Download className="h-3 w-3 mr-1" />
+          Download All ({selectedTask.TasksAttachment.length})
+        </Button>
+        <div className="grid gap-1 max-h-20 overflow-y-auto">
+          {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
+            // Determine the correct download URL
+            let downloadUrl = attachment;
+            if (attachment.startsWith('/')) {
+              downloadUrl = `${window.location.origin}${attachment}`;
+            } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+              downloadUrl = `/api/tasks/assign?taskId=${selectedTask._id}&fileId=${attachment}`;
+            }
+            
+            return (
+              <a 
+                key={index}
+                href={downloadUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                onClick={(e) => {
+                  // For GridFS files, prevent default and download via API
+                  if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+                    e.preventDefault();
+                    window.open(downloadUrl, '_blank');
+                  }
+                }}
+              >
+                <FileText className="h-3 w-3" />
+                File {index + 1}
+              </a>
+            );
+          })}
+        </div>
+      </div>
+    ) : "None"}
+  </td>
+</tr>
                     <tr>
-                      <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
-                        <Paperclip className="h-3 w-3 text-gray-50" /> Assignment Attachments
-                      </td>
-                      <td className="p-2 sm:p-3 break-words">
-                        {selectedTask.assignmentAttachment && Array.isArray(selectedTask.assignmentAttachment) && selectedTask.assignmentAttachment.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, selectedTask.assignmentAttachment || [], 'assignment')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({selectedTask.assignmentAttachment.length})
-                            </Button>
-                            <div className="grid gap-1 max-h-20 overflow-y-auto">
-                              {selectedTask.assignmentAttachment.map((attachment: string, index: number) => (
-                                <a 
-                                  key={index}
-                                  href={attachment} 
-                                  target="_blank" 
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                                >
-                                  <FileText className="h-3 w-3" />
-                                  File {index + 1}
-                                </a>
-                              ))}
-                            </div>
-                          </div>
-                        ) : "None"}
-                      </td>
-                    </tr>
+  <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
+    <Paperclip className="h-3 w-3 text-gray-500" /> Assignment Attachments
+  </td>
+  <td className="p-2 sm:p-3 break-words">
+    {selectedTask.assignmentAttachment && Array.isArray(selectedTask.assignmentAttachment) && selectedTask.assignmentAttachment.length > 0 ? (
+      <div className="space-y-2">
+        <Button 
+          type="button" 
+          variant="outline" 
+          size="sm" 
+          className="text-xs"
+          onClick={() => downloadAllAttachments(selectedTask._id, selectedTask.assignmentAttachment || [], 'assignment')}
+        >
+          <Download className="h-3 w-3 mr-1" />
+          Download All ({selectedTask.assignmentAttachment.length})
+        </Button>
+        <div className="grid gap-1 max-h-20 overflow-y-auto">
+          {selectedTask.assignmentAttachment.map((attachment: string, index: number) => {
+            let downloadUrl = attachment;
+            if (attachment.startsWith('/')) {
+              downloadUrl = `${window.location.origin}${attachment}`;
+            } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+              downloadUrl = `/api/tasks/assign?taskId=${selectedTask._id}&fileId=${attachment}`;
+            }
+            
+            return (
+              <a 
+                key={index}
+                href={downloadUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                onClick={(e) => {
+                  if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+                    e.preventDefault();
+                    window.open(downloadUrl, '_blank');
+                  }
+                }}
+              >
+                <FileText className="h-3 w-3" />
+                File {index + 1}
+              </a>
+            );
+          })}
+        </div>
+      </div>
+    ) : "None"}
+  </td>
+</tr>
                     <tr>
                       <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
                         <FileText className="h-3 w-3 text-gray-500" /> Task Remarks
