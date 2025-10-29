@@ -833,7 +833,7 @@ const downloadFilesIndividually = async (taskId: string) => {
                           id="files"
                           type="file"
                           multiple
-                          accept=".pdf,.jpg,.jpeg,.png,.xlsx,.xls,.doc,.docx,.txt,.csv,.json" // ADD COMMA after .txt
+                          accept=".pdf,.jpg,.jpeg,.png,.xlsx,.xls,.doc,.docx,.txt"
                           onChange={handleFileChange}
                           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
                         />
