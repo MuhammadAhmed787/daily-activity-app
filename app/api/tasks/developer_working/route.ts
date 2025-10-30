@@ -4,12 +4,6 @@ import dbConnect from "@/lib/db";
 import Task from "@/models/Task";
 import { getGridFS } from "@/lib/gridfs";
 
-// Define proper types
-interface MinimalTask {
-  _id: mongoose.Types.ObjectId;
-  finalStatus?: string;
-}
-
 export async function GET(req: Request) {
   await dbConnect();
   try {
@@ -20,7 +14,7 @@ export async function GET(req: Request) {
       return NextResponse.json({ message: "Username is required" }, { status: 400 });
     }
 
-    // Optimized query with proper typing
+    // Get both assigned tasks and rejected tasks assigned to this user
     const tasks = await Task.find({
       "assignedTo.username": username,
       $or: [
@@ -35,12 +29,15 @@ export async function GET(req: Request) {
         }
       ]
     })
-      .populate("company.id", "name city address")
-      .populate("createdBy", "username")
-      .select("code company working priority status developer_status finalStatus assignedTo createdAt assignedDate TasksAttachment assignmentAttachment developer_attachment developer_rejection_solve_attachment developer_remarks developer_rejection_remarks developer_done_date developer_status_rejection rejectionRemarks rejectionAttachment")
-      .lean();
+      .populate("company.id")
+      .populate("createdBy", "username");
 
-    return NextResponse.json(tasks);
+    const tasksWithUsername = tasks.map((task) => ({
+      ...task.toObject(),
+      createdByUsername: task.createdBy?.username || "N/A",
+    }));
+
+    return NextResponse.json(tasksWithUsername);
   } catch (error) {
     console.error("Error fetching developer tasks:", error);
     return NextResponse.json(
@@ -53,79 +50,8 @@ export async function GET(req: Request) {
   }
 }
 
-// Fixed upload function with proper typing
-const uploadFilesToGridFS = async (files: File[], taskId: string, type: string): Promise<string[]> => {
-  if (!files.length) return [];
-
-  const gfs = await getGridFS();
-  const allowedTypes = [
-    "application/pdf",
-    "application/msword",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-    "application/vnd.ms-excel",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "text/plain",
-  ];
-
-  const uploadedIds: string[] = [];
-  const concurrencyLimit = 4;
-  
-  for (let i = 0; i < files.length; i += concurrencyLimit) {
-    const batch = files.slice(i, i + concurrencyLimit);
-    
-    const batchPromises = batch.map(async (file): Promise<string | null> => {
-      try {
-        // Quick validation
-        if (file.size === 0 || file.size > 5 * 1024 * 1024) return null;
-        if (!allowedTypes.includes(file.type)) return null;
-
-        const bytes = await file.arrayBuffer();
-        const buffer = Buffer.from(bytes);
-
-        const uploadStream = (gfs as any).openUploadStream
-          ? (gfs as any).openUploadStream(file.name, {
-              contentType: file.type,
-              metadata: {
-                originalName: file.name,
-                uploadedAt: new Date(),
-                relatedTask: taskId,
-                attachmentType: type
-              },
-            })
-          : null;
-
-        if (!uploadStream) return null;
-
-        return new Promise<string>((resolve, reject) => {
-          uploadStream.end(buffer);
-          uploadStream.on("finish", () => resolve(String(uploadStream.id)));
-          uploadStream.on("error", (err: any) => reject(err));
-        });
-      } catch {
-        return null;
-      }
-    });
-
-    const batchResults = await Promise.allSettled(batchPromises);
-    
-    // Type-safe result handling
-    const successfulUploads = batchResults
-      .filter((result): result is PromiseFulfilledResult<string | null> => result.status === 'fulfilled')
-      .map(result => result.value)
-      .filter((id): id is string => id !== null);
-    
-    uploadedIds.push(...successfulUploads);
-  }
-
-  return uploadedIds;
-};
-
 export async function PUT(req: Request) {
   await dbConnect();
-  
   try {
     const formData = await req.formData();
     const taskId = formData.get("taskId") as string;
@@ -137,7 +63,25 @@ export async function PUT(req: Request) {
     const developer_attachments = formData.getAll("developer_attachments") as File[];
     const developer_rejection_solve_attachments = formData.getAll("developer_rejection_solve_attachments") as File[];
 
-    // Quick validation
+    console.log("FormData received:", {
+      taskId,
+      developer_status,
+      developer_remarks,
+      developer_done_date,
+      developer_status_rejection,
+      developer_rejection_remarks,
+      developer_attachments: developer_attachments.map(file => ({
+        name: file.name,
+        size: file.size,
+        type: file.type
+      })),
+      developer_rejection_solve_attachments: developer_rejection_solve_attachments.map(file => ({
+        name: file.name,
+        size: file.size,
+        type: file.type
+      }))
+    });
+
     if (!taskId || !developer_status || !developer_remarks) {
       return NextResponse.json(
         { message: "Task ID, developer status, and remarks are required" },
@@ -146,20 +90,166 @@ export async function PUT(req: Request) {
     }
 
     if (!mongoose.isValidObjectId(taskId)) {
+      console.log("Invalid taskId:", taskId);
       return NextResponse.json({ message: "Invalid task ID" }, { status: 400 });
     }
 
-    // Check if task exists quickly with proper typing
-    const existingTask = await Task.findById(taskId).select("_id finalStatus").lean() as MinimalTask | null;
+    const validStatuses = ["pending", "done", "not-done", "on-hold"];
+    if (!validStatuses.includes(developer_status)) {
+      return NextResponse.json(
+        { message: `Invalid developer status. Must be one of: ${validStatuses.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
+    // Check if task exists
+    const existingTask = await Task.findById(taskId);
     if (!existingTask) {
       return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
 
-    // Upload files in parallel for maximum speed
-    const [developerAttachmentIds, developerRejectionSolveAttachmentIds] = await Promise.all([
-      uploadFilesToGridFS(developer_attachments, taskId, 'developer'),
-      uploadFilesToGridFS(developer_rejection_solve_attachments, taskId, 'developer_rejection_solve')
-    ]);
+    // Get GridFS instance
+    const gfs = await getGridFS();
+
+    // Upload developer attachments to GridFS
+    const developerAttachmentIds: string[] = [];
+    if (developer_attachments && developer_attachments.length > 0) {
+      console.log("Processing developer attachment uploads to GridFS...");
+      
+      const allowedTypes = [
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "text/plain",
+      ];
+
+      for (const file of developer_attachments) {
+        if (file.size === 0) {
+          console.log("Skipping empty file");
+          continue;
+        }
+
+        if (!allowedTypes.includes(file.type)) {
+          console.log("Invalid file type:", file.type);
+          return NextResponse.json(
+            { message: "Invalid file type. Allowed types: PDF, Word, Excel, JPEG, PNG, GIF, TXT" },
+            { status: 400 }
+          );
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+          console.log("File size too large:", file.size);
+          return NextResponse.json(
+            { message: "File size exceeds 5MB limit" },
+            { status: 400 }
+          );
+        }
+
+        // Upload to GridFS
+        const bytes = await file.arrayBuffer();
+        const buffer = Buffer.from(bytes);
+
+        const uploadStream = (gfs as any).openUploadStream
+          ? (gfs as any).openUploadStream(file.name, {
+              contentType: file.type || undefined,
+              metadata: {
+                originalName: file.name,
+                uploadedAt: new Date(),
+                relatedTask: taskId,
+                attachmentType: 'developer'
+              },
+            })
+          : null;
+
+        if (!uploadStream) {
+          throw new Error("GridFS upload not available");
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          uploadStream.end(buffer);
+          uploadStream.on("finish", () => resolve());
+          uploadStream.on("error", (err: any) => reject(err));
+        });
+
+        developerAttachmentIds.push(String(uploadStream.id));
+      }
+      console.log("Developer files uploaded to GridFS, IDs:", developerAttachmentIds);
+    }
+
+    // Upload rejection solve attachments to GridFS
+    const developerRejectionSolveAttachmentIds: string[] = [];
+    if (developer_rejection_solve_attachments && developer_rejection_solve_attachments.length > 0) {
+      console.log("Processing rejection solve attachment uploads to GridFS...");
+      
+      const allowedTypes = [
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "text/plain",
+      ];
+
+      for (const file of developer_rejection_solve_attachments) {
+        if (file.size === 0) {
+          console.log("Skipping empty rejection solve file");
+          continue;
+        }
+
+        if (!allowedTypes.includes(file.type)) {
+          console.log("Invalid rejection solve file type:", file.type);
+          return NextResponse.json(
+            { message: "Invalid file type. Allowed types: PDF, Word, Excel, JPEG, PNG, GIF, TXT" },
+            { status: 400 }
+          );
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+          console.log("Rejection solve file size too large:", file.size);
+          return NextResponse.json(
+            { message: "File size exceeds 5MB limit" },
+            { status: 400 }
+          );
+        }
+
+        // Upload to GridFS
+        const bytes = await file.arrayBuffer();
+        const buffer = Buffer.from(bytes);
+
+        const uploadStream = (gfs as any).openUploadStream
+          ? (gfs as any).openUploadStream(file.name, {
+              contentType: file.type || undefined,
+              metadata: {
+                originalName: file.name,
+                uploadedAt: new Date(),
+                relatedTask: taskId,
+                attachmentType: 'developer_rejection_solve'
+              },
+            })
+          : null;
+
+        if (!uploadStream) {
+          throw new Error("GridFS upload not available");
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          uploadStream.end(buffer);
+          uploadStream.on("finish", () => resolve());
+          uploadStream.on("error", (err: any) => reject(err));
+        });
+
+        developerRejectionSolveAttachmentIds.push(String(uploadStream.id));
+      }
+      console.log("Rejection solve files uploaded to GridFS, IDs:", developerRejectionSolveAttachmentIds);
+    }
 
     // Prepare update data
     const updateData: any = {
@@ -168,35 +258,72 @@ export async function PUT(req: Request) {
       updatedAt: new Date(),
     };
 
-    // Add optional fields if provided
-    if (developer_done_date) updateData.developer_done_date = new Date(developer_done_date);
+    // Add developer completion date if provided
+    if (developer_done_date) {
+      updateData.developer_done_date = new Date(developer_done_date);
+    }
+
+    // Handle rejection status if provided
     if (developer_status_rejection) {
       updateData.developer_status_rejection = developer_status_rejection;
-      // Fixed: Use optional chaining and type-safe check
+      
+      // If it's a rejected task being fixed, update finalStatus
       if (developer_status_rejection === "fixed" && existingTask.finalStatus === "rejected") {
         updateData.finalStatus = "in-progress";
       }
     }
-    if (developer_rejection_remarks) updateData.developer_rejection_remarks = developer_rejection_remarks;
-    if (developerAttachmentIds.length > 0) updateData.developer_attachment = developerAttachmentIds;
-    if (developerRejectionSolveAttachmentIds.length > 0) updateData.developer_rejection_solve_attachment = developerRejectionSolveAttachmentIds;
 
-    // Fast update without returning full document
-    const updateResult = await Task.updateOne(
+    // Handle rejection remarks if provided
+    if (developer_rejection_remarks) {
+      updateData.developer_rejection_remarks = developer_rejection_remarks;
+    }
+
+    // Add GridFS file IDs to update data
+    if (developerAttachmentIds.length > 0) {
+      updateData.developer_attachment = developerAttachmentIds;
+    }
+
+    if (developerRejectionSolveAttachmentIds.length > 0) {
+      updateData.developer_rejection_solve_attachment = developerRejectionSolveAttachmentIds;
+    }
+
+    console.log("Updating task with data:", updateData);
+
+    // Update task
+    const updatedTask = await Task.findOneAndUpdate(
       { _id: taskId },
-      { $set: updateData }
+      { $set: updateData },
+      {
+        new: true,
+        runValidators: true,
+        setDefaultsOnInsert: true,
+        upsert: false,
+      }
     );
 
-    if (updateResult.matchedCount === 0) {
+    if (!updatedTask) {
+      console.log("Task not found for ID:", taskId);
       return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
 
-    return NextResponse.json({
-      message: "Task status updated successfully",
-      taskId: taskId,
-      success: true
+    // Convert to plain object
+    const taskObject = updatedTask.toObject();
+
+    console.log("Task updated successfully:", {
+      taskId,
+      developer_attachment: taskObject.developer_attachment,
+      developer_rejection_solve_attachment: taskObject.developer_rejection_solve_attachment,
+      developer_remarks,
+      developer_rejection_remarks,
+      developer_status,
+      developer_done_date: taskObject.developer_done_date,
+      developer_status_rejection: taskObject.developer_status_rejection,
     });
 
+    return NextResponse.json({
+      message: "Task status updated successfully",
+      task: taskObject,
+    });
   } catch (error) {
     console.error("Error updating task:", error);
     return NextResponse.json(
