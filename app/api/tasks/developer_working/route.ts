@@ -2,9 +2,7 @@ import { NextResponse } from "next/server";
 import mongoose from "mongoose";
 import dbConnect from "@/lib/db";
 import Task from "@/models/Task";
-import { writeFile, unlink } from "fs/promises";
-import { join } from "path";
-import { existsSync, mkdirSync } from "fs";
+import { getGridFS } from "@/lib/gridfs";
 
 export async function GET(req: Request) {
   await dbConnect();
@@ -110,6 +108,149 @@ export async function PUT(req: Request) {
       return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
 
+    // Get GridFS instance
+    const gfs = await getGridFS();
+
+    // Upload developer attachments to GridFS
+    const developerAttachmentIds: string[] = [];
+    if (developer_attachments && developer_attachments.length > 0) {
+      console.log("Processing developer attachment uploads to GridFS...");
+      
+      const allowedTypes = [
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "text/plain",
+      ];
+
+      for (const file of developer_attachments) {
+        if (file.size === 0) {
+          console.log("Skipping empty file");
+          continue;
+        }
+
+        if (!allowedTypes.includes(file.type)) {
+          console.log("Invalid file type:", file.type);
+          return NextResponse.json(
+            { message: "Invalid file type. Allowed types: PDF, Word, Excel, JPEG, PNG, GIF, TXT" },
+            { status: 400 }
+          );
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+          console.log("File size too large:", file.size);
+          return NextResponse.json(
+            { message: "File size exceeds 5MB limit" },
+            { status: 400 }
+          );
+        }
+
+        // Upload to GridFS
+        const bytes = await file.arrayBuffer();
+        const buffer = Buffer.from(bytes);
+
+        const uploadStream = (gfs as any).openUploadStream
+          ? (gfs as any).openUploadStream(file.name, {
+              contentType: file.type || undefined,
+              metadata: {
+                originalName: file.name,
+                uploadedAt: new Date(),
+                relatedTask: taskId,
+                attachmentType: 'developer'
+              },
+            })
+          : null;
+
+        if (!uploadStream) {
+          throw new Error("GridFS upload not available");
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          uploadStream.end(buffer);
+          uploadStream.on("finish", () => resolve());
+          uploadStream.on("error", (err: any) => reject(err));
+        });
+
+        developerAttachmentIds.push(String(uploadStream.id));
+      }
+      console.log("Developer files uploaded to GridFS, IDs:", developerAttachmentIds);
+    }
+
+    // Upload rejection solve attachments to GridFS
+    const developerRejectionSolveAttachmentIds: string[] = [];
+    if (developer_rejection_solve_attachments && developer_rejection_solve_attachments.length > 0) {
+      console.log("Processing rejection solve attachment uploads to GridFS...");
+      
+      const allowedTypes = [
+        "application/pdf",
+        "application/msword",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "image/jpeg",
+        "image/png",
+        "image/gif",
+        "text/plain",
+      ];
+
+      for (const file of developer_rejection_solve_attachments) {
+        if (file.size === 0) {
+          console.log("Skipping empty rejection solve file");
+          continue;
+        }
+
+        if (!allowedTypes.includes(file.type)) {
+          console.log("Invalid rejection solve file type:", file.type);
+          return NextResponse.json(
+            { message: "Invalid file type. Allowed types: PDF, Word, Excel, JPEG, PNG, GIF, TXT" },
+            { status: 400 }
+          );
+        }
+
+        if (file.size > 5 * 1024 * 1024) {
+          console.log("Rejection solve file size too large:", file.size);
+          return NextResponse.json(
+            { message: "File size exceeds 5MB limit" },
+            { status: 400 }
+          );
+        }
+
+        // Upload to GridFS
+        const bytes = await file.arrayBuffer();
+        const buffer = Buffer.from(bytes);
+
+        const uploadStream = (gfs as any).openUploadStream
+          ? (gfs as any).openUploadStream(file.name, {
+              contentType: file.type || undefined,
+              metadata: {
+                originalName: file.name,
+                uploadedAt: new Date(),
+                relatedTask: taskId,
+                attachmentType: 'developer_rejection_solve'
+              },
+            })
+          : null;
+
+        if (!uploadStream) {
+          throw new Error("GridFS upload not available");
+        }
+
+        await new Promise<void>((resolve, reject) => {
+          uploadStream.end(buffer);
+          uploadStream.on("finish", () => resolve());
+          uploadStream.on("error", (err: any) => reject(err));
+        });
+
+        developerRejectionSolveAttachmentIds.push(String(uploadStream.id));
+      }
+      console.log("Rejection solve files uploaded to GridFS, IDs:", developerRejectionSolveAttachmentIds);
+    }
+
     // Prepare update data
     const updateData: any = {
       developer_status,
@@ -137,170 +278,13 @@ export async function PUT(req: Request) {
       updateData.developer_rejection_remarks = developer_rejection_remarks;
     }
 
-    // Handle multiple file uploads for developer attachments
-    if (developer_attachments && developer_attachments.length > 0) {
-      console.log("Processing developer attachment uploads...");
-      const allowedTypes = [
-        "application/pdf",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "image/jpeg",
-        "image/png",
-        "image/gif",
-        "text/plain",
-      ];
-
-      // Ensure uploads directory exists
-      const uploadDir = join(process.cwd(), "public", "uploads");
-      try {
-        if (!existsSync(uploadDir)) {
-          console.log("Creating uploads directory:", uploadDir);
-          mkdirSync(uploadDir, { recursive: true });
-        }
-      } catch (dirError) {
-        console.error("Error creating uploads directory:", dirError);
-        return NextResponse.json(
-          { message: "Failed to create uploads directory", error: dirError instanceof Error ? dirError.message : String(dirError) },
-          { status: 500 }
-        );
-      }
-
-      // Delete old attachments if they exist
-      if (existingTask.developer_attachment && existingTask.developer_attachment.length > 0) {
-        for (const oldAttachment of existingTask.developer_attachment) {
-          const oldFilePath = join(process.cwd(), "public", oldAttachment);
-          if (existsSync(oldFilePath)) {
-            await unlink(oldFilePath);
-            console.log("Deleted old file:", oldFilePath);
-          }
-        }
-      }
-
-      // Process and save new files
-      const newAttachmentPaths: string[] = [];
-      
-      for (const file of developer_attachments) {
-        if (file.size === 0) {
-          console.log("Skipping empty file");
-          continue;
-        }
-
-        if (!allowedTypes.includes(file.type)) {
-          console.log("Invalid file type:", file.type);
-          return NextResponse.json(
-            { message: "Invalid file type. Allowed types: PDF, Word, Excel, JPEG, PNG, GIF, TXT" },
-            { status: 400 }
-          );
-        }
-
-        if (file.size > 5 * 1024 * 1024) {
-          console.log("File size too large:", file.size);
-          return NextResponse.json(
-            { message: "File size exceeds 5MB limit" },
-            { status: 400 }
-          );
-        }
-
-        // Save file
-        const bytes = await file.arrayBuffer();
-        const buffer = Buffer.from(bytes);
-        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        const ext = file.name.split(".").pop();
-        const filename = `${uniqueSuffix}.${ext}`;
-        const path = join(uploadDir, filename);
-
-        console.log("Saving file to:", path);
-        await writeFile(path, buffer);
-        newAttachmentPaths.push(`/uploads/${filename}`);
-      }
-
-      updateData.developer_attachment = newAttachmentPaths;
-      console.log("Files saved, attachment paths:", newAttachmentPaths);
+    // Add GridFS file IDs to update data
+    if (developerAttachmentIds.length > 0) {
+      updateData.developer_attachment = developerAttachmentIds;
     }
 
-    // Handle multiple file uploads for rejection solve attachments
-    if (developer_rejection_solve_attachments && developer_rejection_solve_attachments.length > 0) {
-      console.log("Processing rejection solve attachment uploads...");
-      const allowedTypes = [
-        "application/pdf",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "image/jpeg",
-        "image/png",
-        "image/gif",
-        "text/plain",
-      ];
-
-      // Ensure uploads directory exists
-      const uploadDir = join(process.cwd(), "public", "uploads");
-      try {
-        if (!existsSync(uploadDir)) {
-          console.log("Creating uploads directory:", uploadDir);
-          mkdirSync(uploadDir, { recursive: true });
-        }
-      } catch (dirError) {
-        console.error("Error creating uploads directory:", dirError);
-        return NextResponse.json(
-          { message: "Failed to create uploads directory", error: dirError instanceof Error ? dirError.message : String(dirError) },
-          { status: 500 }
-        );
-      }
-
-      // Delete old attachments if they exist
-      if (existingTask.developer_rejection_solve_attachment && existingTask.developer_rejection_solve_attachment.length > 0) {
-        for (const oldAttachment of existingTask.developer_rejection_solve_attachment) {
-          const oldFilePath = join(process.cwd(), "public", oldAttachment);
-          if (existsSync(oldFilePath)) {
-            await unlink(oldFilePath);
-            console.log("Deleted old rejection solve file:", oldFilePath);
-          }
-        }
-      }
-
-      // Process and save new files
-      const newRejectionSolveAttachmentPaths: string[] = [];
-      
-      for (const file of developer_rejection_solve_attachments) {
-        if (file.size === 0) {
-          console.log("Skipping empty rejection solve file");
-          continue;
-        }
-
-        if (!allowedTypes.includes(file.type)) {
-          console.log("Invalid rejection solve file type:", file.type);
-          return NextResponse.json(
-            { message: "Invalid file type. Allowed types: PDF, Word, Excel, JPEG, PNG, GIF, TXT" },
-            { status: 400 }
-          );
-        }
-
-        if (file.size > 5 * 1024 * 1024) {
-          console.log("Rejection solve file size too large:", file.size);
-          return NextResponse.json(
-            { message: "File size exceeds 5MB limit" },
-            { status: 400 }
-          );
-        }
-
-        // Save file
-        const bytes = await file.arrayBuffer();
-        const buffer = Buffer.from(bytes);
-        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        const ext = file.name.split(".").pop();
-        const filename = `rejection-solve-${uniqueSuffix}.${ext}`;
-        const path = join(uploadDir, filename);
-
-        console.log("Saving rejection solve file to:", path);
-        await writeFile(path, buffer);
-        newRejectionSolveAttachmentPaths.push(`/uploads/${filename}`);
-      }
-
-      updateData.developer_rejection_solve_attachment = newRejectionSolveAttachmentPaths;
-      console.log("Rejection solve files saved, attachment paths:", newRejectionSolveAttachmentPaths);
+    if (developerRejectionSolveAttachmentIds.length > 0) {
+      updateData.developer_rejection_solve_attachment = developerRejectionSolveAttachmentIds;
     }
 
     console.log("Updating task with data:", updateData);

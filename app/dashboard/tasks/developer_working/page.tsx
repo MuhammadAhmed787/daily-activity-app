@@ -87,7 +87,7 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
     for (let i = 0; i < attachments.length; i++) {
       const attachment = attachments[i];
       
-      // Handle both relative and absolute URLs
+      // Handle both relative URLs and GridFS ObjectIds
       let fileUrl = attachment;
       
       // If it's a relative path (starts with /), make it absolute
@@ -115,11 +115,17 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
               fileName = filenameMatch[1];
             }
           } else {
-            // Try to extract filename from URL
-            const urlParts = fileUrl.split('/');
-            const lastPart = urlParts[urlParts.length - 1];
-            if (lastPart && lastPart.includes('.')) {
-              fileName = lastPart;
+            // For GridFS files, try to get filename from metadata or use attachment ID
+            if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+              // Try to get original filename from your API if available
+              fileName = `gridfs-file-${attachment}`;
+            } else {
+              // Try to extract filename from URL
+              const urlParts = fileUrl.split('/');
+              const lastPart = urlParts[urlParts.length - 1];
+              if (lastPart && lastPart.includes('.')) {
+                fileName = lastPart;
+              }
             }
           }
           
@@ -921,33 +927,50 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
                       </td>
                       <td className="p-2 sm:p-3 break-words">
                         {selectedTask.developer_attachment && Array.isArray(selectedTask.developer_attachment) && selectedTask.developer_attachment.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, selectedTask.developer_attachment || [], 'developer')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({selectedTask.developer_attachment.length})
-                            </Button>
-                            <div className="grid gap-1 max-h-20 overflow-y-auto">
-                              {selectedTask.developer_attachment.map((attachment: string, index: number) => (
-                                <a 
-                                  key={index}
-                                  href={attachment} 
-                                  target="_blank" 
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                                >
-                                  <FileText className="h-3 w-3" />
-                                  File {index + 1}
-                                </a>
-                              ))}
-                            </div>
-                          </div>
-                        ) : "None"}
+  <div className="space-y-2">
+    <Button 
+      type="button" 
+      variant="outline" 
+      size="sm" 
+      className="text-xs"
+      onClick={() => downloadAllAttachments(selectedTask._id, selectedTask.developer_attachment || [], 'developer')}
+    >
+      <Download className="h-3 w-3 mr-1" />
+      Download All ({selectedTask.developer_attachment.length})
+    </Button>
+    <div className="grid gap-1 max-h-20 overflow-y-auto">
+      {selectedTask.developer_attachment.map((attachment: string, index: number) => {
+        // Determine the correct download URL for GridFS files
+        let downloadUrl = attachment;
+        if (attachment.startsWith('/')) {
+          downloadUrl = `${window.location.origin}${attachment}`;
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          downloadUrl = `/api/tasks/assign?taskId=${selectedTask._id}&fileId=${attachment}`;
+        }
+        
+        return (
+          <a 
+            key={index}
+            href={downloadUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+            onClick={(e) => {
+              // For GridFS files, prevent default and download via API
+              if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+                e.preventDefault();
+                window.open(downloadUrl, '_blank');
+              }
+            }}
+          >
+            <FileText className="h-3 w-3" />
+            File {index + 1} {/^[0-9a-fA-F]{24}$/.test(attachment) ? '(GridFS)' : ''}
+          </a>
+        );
+      })}
+    </div>
+  </div>
+) : "None"}
                       </td>
                     </tr>
                     <tr>
