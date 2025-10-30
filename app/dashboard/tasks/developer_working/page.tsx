@@ -76,69 +76,98 @@ const calculateElapsedTime = (startDate: string, endDate: string) => {
   return `${days}d ${hours}h ${minutes}m`;
 };
 
-// Download all attachments as a zip file
+// Fast parallel download function with proper TypeScript
 const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  // Early validation
+  if (!attachments || attachments.length === 0) {
+    toast({
+      title: "No Files",
+      description: "No attachments available to download",
+      variant: "default",
+    });
+    return;
+  }
+
+  const toastId = toast({
+    title: "Preparing Download",
+    description: "Starting download process...",
+    duration: 1000,
+  });
+
   try {
     const zip = new JSZip();
-    const folder = zip.folder(`${type}-attachments-${taskId}`);
-    
     let successCount = 0;
-    
+    const failedDownloads: number[] = [];
+
+    // Download files in parallel with controlled concurrency
+    const concurrencyLimit = 6;
+    const downloadPromises: Promise<boolean>[] = [];
+
     for (let i = 0; i < attachments.length; i++) {
       const attachment = attachments[i];
       
-      // Handle both relative URLs and GridFS ObjectIds
-      let fileUrl = attachment;
-      
-      // If it's a relative path (starts with /), make it absolute
-      if (attachment.startsWith('/')) {
-        fileUrl = `${window.location.origin}${attachment}`;
-      }
-      // If it's a GridFS ObjectId, use the API endpoint
-      else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-        fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
-      }
-      
-      try {
-        console.log(`Downloading file: ${fileUrl}`);
-        const response = await fetch(fileUrl);
-        
-        if (response.ok) {
+      // Create download promise for each file
+      const downloadPromise = (async (index: number): Promise<boolean> => {
+        try {
+          let fileUrl = attachment;
+          
+          // Handle URL construction
+          if (attachment.startsWith('/')) {
+            fileUrl = `${window.location.origin}${attachment}`;
+          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+            fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
+          }
+          
+          const response = await fetch(fileUrl);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          
           const blob = await response.blob();
           
-          // Get filename from response headers or use a default name
-          let fileName = `file-${i + 1}`;
+          // Get filename efficiently
+          let fileName = `file-${index + 1}`;
           const contentDisposition = response.headers.get('content-disposition');
           if (contentDisposition) {
             const filenameMatch = contentDisposition.match(/filename="(.+)"/);
-            if (filenameMatch) {
-              fileName = filenameMatch[1];
-            }
-          } else {
-            // For GridFS files, try to get filename from metadata or use attachment ID
-            if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-              // Try to get original filename from your API if available
-              fileName = `gridfs-file-${attachment}`;
-            } else {
-              // Try to extract filename from URL
-              const urlParts = fileUrl.split('/');
-              const lastPart = urlParts[urlParts.length - 1];
-              if (lastPart && lastPart.includes('.')) {
-                fileName = lastPart;
-              }
-            }
+            if (filenameMatch) fileName = filenameMatch[1];
+          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+            fileName = `attachment-${index + 1}`;
           }
           
-          folder?.file(fileName, blob);
-          successCount++;
-        } else {
-          console.warn(`Failed to download file: ${fileUrl}, status: ${response.status}`);
+          // Add to zip immediately
+          zip.file(fileName, blob);
+          return true;
+        } catch (error) {
+          console.warn(`Failed to download file ${index + 1}:`, error);
+          failedDownloads.push(index + 1);
+          return false;
         }
-      } catch (fileError) {
-        console.error(`Error downloading file ${fileUrl}:`, fileError);
+      })(i);
+
+      downloadPromises.push(downloadPromise);
+
+      // Control concurrency: wait when we have enough concurrent downloads
+      if (downloadPromises.length >= concurrencyLimit) {
+        const results = await Promise.allSettled(downloadPromises.splice(0, concurrencyLimit));
+        successCount += results.filter(result => result.status === 'fulfilled' && result.value === true).length;
+        
+        // Update progress for large downloads
+        if (attachments.length > 8) {
+          toast({
+            title: "Download Progress",
+            description: `Downloaded ${successCount} of ${attachments.length} files`,
+            duration: 1000,
+          });
+        }
       }
     }
-    
+
+    // Process remaining promises
+    if (downloadPromises.length > 0) {
+      const results = await Promise.allSettled(downloadPromises);
+      successCount += results.filter(result => result.status === 'fulfilled' && result.value === true).length;
+    }
+
+    // Handle results
     if (successCount === 0) {
       toast({
         title: "Download Failed",
@@ -147,19 +176,67 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
       });
       return;
     }
-    
-    const content = await zip.generateAsync({ type: "blob" });
-    saveAs(content, `${type}-attachments-${taskId}.zip`);
-    
+
+    // Generate ZIP with optimized settings
     toast({
-      title: "Download Complete",
-      description: `Downloaded ${successCount} files as ZIP`,
+      title: "Creating ZIP",
+      description: "Compressing files...",
+      duration: 1000,
     });
+
+    const content = await zip.generateAsync({ 
+      type: "blob" as any,
+      compression: "DEFLATE",
+      compressionOptions: { level: 1 }
+    });
+    
+    // Use direct download without delay
+    saveAs(content, `${type}-attachments-${taskId}-${Date.now()}.zip`);
+
+    // Show final result
+    if (failedDownloads.length > 0) {
+      toast({
+        title: "Download Complete with Warnings",
+        description: `Downloaded ${successCount} files, failed: ${failedDownloads.join(', ')}`,
+        duration: 1500,
+      });
+    } else {
+      toast({
+        title: "Download Complete",
+        description: `Successfully downloaded ${successCount} files`,
+        duration: 1500,
+      });
+    }
+
   } catch (error) {
-    console.error("Error downloading attachments:", error);
+    console.error("Error in download process:", error);
     toast({
       title: "Download Error",
-      description: "Failed to download attachments. Please try again.",
+      description: "Failed to process download. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
+
+// Alternative: Fast single file download with proper typing
+const downloadFileFast = async (taskId: string, attachment: string, fileName?: string) => {
+  try {
+    let fileUrl = attachment;
+    
+    if (attachment.startsWith('/')) {
+      fileUrl = `${window.location.origin}${attachment}`;
+    } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+      fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
+    }
+    
+    // For single files, open directly in new tab (fastest method)
+    window.open(fileUrl, '_blank');
+    
+  } catch (error) {
+    console.error("Error downloading single file:", error);
+    toast({
+      title: "Download Failed",
+      description: "Could not download the file",
       variant: "destructive",
     });
   }
