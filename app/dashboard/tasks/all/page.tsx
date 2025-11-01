@@ -191,30 +191,80 @@ export default function AllTasksPage() {
     setCompletionAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    try {
-      const zip = new JSZip();
-      const folder = zip.folder(`${type}-attachments`);
+const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  if (!attachments || attachments.length === 0) {
+    toast({
+      title: "No Files",
+      description: "No attachments available to download",
+      variant: "default",
+    });
+    return;
+  }
 
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        const response = await fetch(attachment);
+  toast({
+    title: "Starting Download",
+    description: `Preparing to download ${attachments.length} files...`,
+  });
+
+  try {
+    const zip = new JSZip();
+    
+    for (let i = 0; i < attachments.length; i++) {
+      const attachment = attachments[i];
+      
+      try {
+        // Construct proper URL
+        let fileUrl = attachment;
+        if (attachment.startsWith('/')) {
+          fileUrl = `${window.location.origin}${attachment}`;
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
+        }
+
+        const response = await fetch(fileUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
         const blob = await response.blob();
-        const fileName = attachment.split('/').pop() || `file-${i}`;
-        folder?.file(fileName, blob);
+        
+        // Simple filename generation
+        let fileName = `attachment-${i + 1}`;
+        if (attachment.includes('/')) {
+          fileName = attachment.split('/').pop() || fileName;
+        }
+        
+        // Add file extension based on content type
+        const ext = blob.type.split('/')[1] || 'bin';
+        if (!fileName.includes('.')) {
+          fileName = `${fileName}.${ext}`;
+        }
+        
+        zip.file(fileName, blob);
+      } catch (error) {
+        console.warn(`Failed to download file ${i + 1}:`, error);
+        // Add empty file with error note
+        zip.file(`failed-file-${i + 1}.txt`, `Failed to download: ${attachment}`);
       }
-
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-    } catch (error) {
-      console.error("Error downloading attachments:", error);
-      toast({
-        title: "Download Error",
-        description: "Failed to download attachments. Please try again.",
-        variant: "destructive",
-      });
     }
-  };
+
+    const content = await zip.generateAsync({ type: "blob" });
+    const timestamp = new Date().toISOString().split('T')[0];
+    saveAs(content, `${type}-attachments-${taskId}-${timestamp}.zip`);
+    
+    toast({
+      title: "Download Complete",
+      description: `ZIP file with ${attachments.length} attachments downloaded`,
+      duration: 2000,
+    });
+    
+  } catch (error) {
+    console.error("Download error:", error);
+    toast({
+      title: "Download Failed",
+      description: "Could not create download file",
+      variant: "destructive",
+    });
+  }
+};
 
   const handleApproveTaskCompletion = async () => {
     if (!selectedTask || !taskStatus) {
