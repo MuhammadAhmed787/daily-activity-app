@@ -191,30 +191,144 @@ export default function AllTasksPage() {
     setCompletionAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    try {
-      const zip = new JSZip();
-      const folder = zip.folder(`${type}-attachments`);
+const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  if (!attachments || attachments.length === 0) {
+    toast({
+      title: "No Files",
+      description: "No attachments available to download",
+      variant: "default",
+    });
+    return;
+  }
 
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        const response = await fetch(attachment);
+  const toastId = toast({
+    title: "Preparing Download",
+    description: "Starting download process...",
+  });
+
+  try {
+    const zip = new JSZip();
+    let successCount = 0;
+    const failedDownloads: string[] = [];
+
+    // Download all files in parallel
+    const downloadPromises = attachments.map(async (attachment, index) => {
+      try {
+        let fileUrl = attachment;
+        
+        // Handle URL construction properly
+        if (attachment.startsWith('/')) {
+          fileUrl = `${window.location.origin}${attachment}`;
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          // This is a MongoDB GridFS file ID
+          fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
+        }
+        // If it's already a full URL, use it as is
+        
+        console.log(`Downloading from: ${fileUrl}`); // Debug log
+        
+        const response = await fetch(fileUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
         const blob = await response.blob();
-        const fileName = attachment.split('/').pop() || `file-${i}`;
-        folder?.file(fileName, blob);
-      }
+        
+        // Get proper filename
+        let fileName = `file-${index + 1}`;
+        const contentDisposition = response.headers.get('content-disposition');
+        
+        if (contentDisposition) {
+          // Extract filename from content-disposition header
+          const filenameMatch = contentDisposition.match(/filename="?(.+?)"?$/);
+          if (filenameMatch) {
+            fileName = filenameMatch[1];
+          }
+        } else {
+          // Try to extract filename from URL
+          try {
+            const url = new URL(fileUrl, window.location.origin);
+            const pathname = url.pathname;
+            const urlFileName = pathname.split('/').pop();
+            if (urlFileName && urlFileName.includes('.')) {
+              fileName = urlFileName;
+            }
+          } catch (e) {
+            console.warn('Could not parse URL:', fileUrl);
+          }
+        }
 
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-    } catch (error) {
-      console.error("Error downloading attachments:", error);
+        // Ensure file has proper extension
+        if (!fileName.includes('.')) {
+          // Try to determine extension from blob type
+          const mimeType = blob.type;
+          const extension = mimeType.split('/')[1] || 'bin';
+          fileName = `${fileName}.${extension}`;
+        }
+
+        console.log(`Saving as: ${fileName}`); // Debug log
+        
+        zip.file(fileName, blob);
+        successCount++;
+        return { success: true, fileName };
+      } catch (error) {
+        console.error(`Failed to download file ${index + 1}:`, error);
+        failedDownloads.push(`File ${index + 1}`);
+        return { success: false, fileName: `file-${index + 1}` };
+      }
+    });
+
+    // Wait for all downloads to complete
+    const results = await Promise.allSettled(downloadPromises);
+
+    if (successCount === 0) {
       toast({
-        title: "Download Error",
-        description: "Failed to download attachments. Please try again.",
+        title: "Download Failed",
+        description: "Could not download any files",
         variant: "destructive",
       });
+      return;
     }
-  };
+
+    // Generate ZIP file
+    toast({
+      title: "Creating ZIP",
+      description: "Compressing files...",
+    });
+
+    const content = await zip.generateAsync({ 
+      type: "blob",
+      compression: "STORE", // No compression for faster generation
+    });
+
+    // Create descriptive filename
+    const timestamp = new Date().toISOString().split('T')[0];
+    const zipFileName = `${type}-attachments-${taskId}-${timestamp}.zip`;
+
+    // Download the ZIP
+    saveAs(content, zipFileName);
+
+    // Show final result
+    if (failedDownloads.length > 0) {
+      toast({
+        title: "Download Complete with Issues",
+        description: `Downloaded ${successCount} files, ${failedDownloads.length} failed`,
+        variant: "destructive",
+      });
+    } else {
+      toast({
+        title: "Download Complete",
+        description: `Successfully downloaded ${successCount} files`,
+      });
+    }
+
+  } catch (error) {
+    console.error("Error in download process:", error);
+    toast({
+      title: "Download Error",
+      description: "Failed to process download. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
 
   const handleApproveTaskCompletion = async () => {
     if (!selectedTask || !taskStatus) {
