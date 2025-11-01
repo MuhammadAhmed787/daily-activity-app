@@ -90,84 +90,58 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
 
   const toastId = toast({
     title: "Preparing Download",
-    description: "Starting download process...",
-    duration: 1000,
+    description: "Starting parallel download...",
+    duration: 2000,
   });
 
   try {
     const zip = new JSZip();
-    let successCount = 0;
     const failedDownloads: number[] = [];
 
-    // Download files in parallel with controlled concurrency
-    const concurrencyLimit = 6;
-    const downloadPromises: Promise<boolean>[] = [];
-
-    for (let i = 0; i < attachments.length; i++) {
-      const attachment = attachments[i];
-      
-      // Create download promise for each file
-      const downloadPromise = (async (index: number): Promise<boolean> => {
-        try {
-          let fileUrl = attachment;
-          
-          // Handle URL construction
-          if (attachment.startsWith('/')) {
-            fileUrl = `${window.location.origin}${attachment}`;
-          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-            fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
-          }
-          
-          const response = await fetch(fileUrl);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          
-          const blob = await response.blob();
-          
-          // Get filename efficiently
-          let fileName = `file-${index + 1}`;
-          const contentDisposition = response.headers.get('content-disposition');
-          if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
-            if (filenameMatch) fileName = filenameMatch[1];
-          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-            fileName = `attachment-${index + 1}`;
-          }
-          
-          // Add to zip immediately
-          zip.file(fileName, blob);
-          return true;
-        } catch (error) {
-          console.warn(`Failed to download file ${index + 1}:`, error);
-          failedDownloads.push(index + 1);
-          return false;
-        }
-      })(i);
-
-      downloadPromises.push(downloadPromise);
-
-      // Control concurrency: wait when we have enough concurrent downloads
-      if (downloadPromises.length >= concurrencyLimit) {
-        const results = await Promise.allSettled(downloadPromises.splice(0, concurrencyLimit));
-        successCount += results.filter(result => result.status === 'fulfilled' && result.value === true).length;
+    // Download ALL files in true parallel (no batching)
+    const downloadPromises = attachments.map(async (attachment, index) => {
+      try {
+        let fileUrl = attachment;
         
-        // Update progress for large downloads
-        if (attachments.length > 8) {
-          toast({
-            title: "Download Progress",
-            description: `Downloaded ${successCount} of ${attachments.length} files`,
-            duration: 1000,
-          });
+        // Handle URL construction
+        if (attachment.startsWith('/')) {
+          fileUrl = `${window.location.origin}${attachment}`;
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
         }
+        
+        const response = await fetch(fileUrl);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        
+        const blob = await response.blob();
+        
+        // Get filename
+        let fileName = `file-${index + 1}`;
+        const contentDisposition = response.headers.get('content-disposition');
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+          if (filenameMatch) fileName = filenameMatch[1];
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          fileName = `attachment-${index + 1}`;
+        }
+        
+        // Add to zip immediately
+        zip.file(fileName, blob);
+        return { success: true, index };
+      } catch (error) {
+        console.warn(`Failed to download file ${index + 1}:`, error);
+        return { success: false, index };
       }
-    }
+    });
 
-    // Process remaining promises
-    if (downloadPromises.length > 0) {
-      const results = await Promise.allSettled(downloadPromises);
-      successCount += results.filter(result => result.status === 'fulfilled' && result.value === true).length;
-    }
+    // Wait for ALL downloads to complete in parallel
+    const results = await Promise.allSettled(downloadPromises);
+    
+    const successCount = results.filter(result => 
+      result.status === 'fulfilled' && result.value?.success === true
+    ).length;
 
-    // Handle results
+    // Handle results immediately
     if (successCount === 0) {
       toast({
         title: "Download Failed",
@@ -177,34 +151,41 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
       return;
     }
 
-    // Generate ZIP with optimized settings
+    // Generate ZIP without compression for maximum speed
     toast({
       title: "Creating ZIP",
-      description: "Compressing files...",
+      description: "Finalizing download...",
       duration: 1000,
     });
 
+    // Use STORE (no compression) for fastest ZIP creation
     const content = await zip.generateAsync({ 
       type: "blob" as any,
-      compression: "DEFLATE",
-      compressionOptions: { level: 1 }
+      compression: "STORE", // No compression = much faster
+      compressionOptions: { level: 0 }
     });
     
-    // Use direct download without delay
+    // Immediate download
     saveAs(content, `${type}-attachments-${taskId}-${Date.now()}.zip`);
 
     // Show final result
-    if (failedDownloads.length > 0) {
+    const failedIndices = results
+      .filter((result): result is PromiseFulfilledResult<{success: false, index: number}> => 
+        result.status === 'fulfilled' && result.value?.success === false
+      )
+      .map(result => result.value.index + 1);
+
+    if (failedIndices.length > 0) {
       toast({
-        title: "Download Complete with Warnings",
-        description: `Downloaded ${successCount} files, failed: ${failedDownloads.join(', ')}`,
-        duration: 1500,
+        title: "Download Complete",
+        description: `Downloaded ${successCount} files, ${failedIndices.length} failed`,
+        duration: 2000,
       });
     } else {
       toast({
         title: "Download Complete",
         description: `Successfully downloaded ${successCount} files`,
-        duration: 1500,
+        duration: 2000,
       });
     }
 
@@ -213,30 +194,6 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
     toast({
       title: "Download Error",
       description: "Failed to process download. Please try again.",
-      variant: "destructive",
-    });
-  }
-};
-
-// Alternative: Fast single file download with proper typing
-const downloadFileFast = async (taskId: string, attachment: string, fileName?: string) => {
-  try {
-    let fileUrl = attachment;
-    
-    if (attachment.startsWith('/')) {
-      fileUrl = `${window.location.origin}${attachment}`;
-    } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-      fileUrl = `/api/tasks/assign?taskId=${taskId}&fileId=${attachment}`;
-    }
-    
-    // For single files, open directly in new tab (fastest method)
-    window.open(fileUrl, '_blank');
-    
-  } catch (error) {
-    console.error("Error downloading single file:", error);
-    toast({
-      title: "Download Failed",
-      description: "Could not download the file",
       variant: "destructive",
     });
   }
