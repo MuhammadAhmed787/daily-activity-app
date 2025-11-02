@@ -191,30 +191,63 @@ export default function AllTasksPage() {
     setCompletionAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    try {
-      const zip = new JSZip();
-      const folder = zip.folder(`${type}-attachments`);
+ const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  try {
+    const zip = new JSZip();
+    const folder = zip.folder(`${type}-attachments`);
 
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        const response = await fetch(attachment);
+    for (let i = 0; i < attachments.length; i++) {
+      const fileId = attachments[i];
+      
+      try {
+        // Fetch the file from your API endpoint
+        const response = await fetch(`/api/tasks?fileId=${fileId}`);
+        
+        if (!response.ok) {
+          throw new Error(`Failed to fetch file: ${response.statusText}`);
+        }
+
+        // Get the blob and filename from response
         const blob = await response.blob();
-        const fileName = attachment.split('/').pop() || `file-${i}`;
-        folder?.file(fileName, blob);
-      }
+        
+        // Extract filename from Content-Disposition header or use a default
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let fileName = `file-${i+1}`;
+        
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+          if (filenameMatch) {
+            fileName = filenameMatch[1];
+          }
+        }
 
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-    } catch (error) {
-      console.error("Error downloading attachments:", error);
-      toast({
-        title: "Download Error",
-        description: "Failed to download attachments. Please try again.",
-        variant: "destructive",
-      });
+        // Add file to zip
+        folder?.file(fileName, blob);
+        
+      } catch (fileError) {
+        console.error(`Error downloading file ${fileId}:`, fileError);
+        // Continue with other files even if one fails
+        folder?.file(`file-${i+1}-error.txt`, `Failed to download file: ${fileId}`);
+      }
     }
-  };
+
+    const content = await zip.generateAsync({ type: "blob" });
+    saveAs(content, `task-${taskId}-${type}-attachments.zip`);
+    
+    toast({
+      title: "Download Started",
+      description: `Downloading ${attachments.length} ${type} attachments`,
+    });
+    
+  } catch (error) {
+    console.error("Error downloading attachments:", error);
+    toast({
+      title: "Download Error",
+      description: "Failed to download attachments. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
 
   const handleApproveTaskCompletion = async () => {
     if (!selectedTask || !taskStatus) {
@@ -669,17 +702,18 @@ export default function AllTasksPage() {
                             </Button>
                             <div className="grid gap-1 max-h-20 overflow-y-auto">
                               {selectedTask.TasksAttachment.map((attachment: string, index: number) => (
-                                <a 
-                                  key={index}
-                                  href={attachment} 
-                                  target="_blank" 
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                                >
-                                  <FileText className="h-3 w-3" />
-                                  File {index + 1}
-                                </a>
-                              ))}
+  <a 
+    key={index}
+    href={`/api/tasks?fileId=${attachment}`} 
+    target="_blank" 
+    rel="noopener noreferrer"
+    className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+    download // Add download attribute for direct download
+  >
+    <FileText className="h-3 w-3" />
+    File {index + 1}
+  </a>
+))}
                             </div>
                           </div>
                         ) : "None"}
