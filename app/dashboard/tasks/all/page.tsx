@@ -346,6 +346,32 @@ const getFileExtensionFromPath = (path: string): string => {
       })
       return
     }
+      // Validate file sizes before sending
+  const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10MB
+  let totalSize = 0;
+
+  // Check individual file sizes
+  for (const file of completionAttachments) {
+    if (file.size > MAX_FILE_SIZE) {
+      toast({
+        title: "File Too Large",
+        description: `File "${file.name}" exceeds 10MB limit. Please choose smaller files.`,
+        variant: "destructive",
+      });
+      return;
+    }
+    totalSize += file.size;
+  }
+
+  // Check total size (optional - you can adjust this limit)
+  if (totalSize > 25 * 1024 * 1024) { // 25MB total
+    toast({
+      title: "Total File Size Too Large",
+      description: "Total attachment size exceeds 25MB. Please reduce the number or size of files.",
+      variant: "destructive",
+    });
+    return;
+  }
 
     setIsApproving(true)
     try {
