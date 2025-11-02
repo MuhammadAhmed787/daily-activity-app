@@ -14,7 +14,7 @@ export async function GET(req: Request) {
   try {
     const url = new URL(req.url);
     const taskId = url.searchParams.get("id");
-    const fileId = url.searchParams.get("fileId"); // used to download files directly
+    const fileId = url.searchParams.get("fileId");
 
     // ------------- File download via GridFS -------------
     if (fileId) {
@@ -32,27 +32,53 @@ export async function GET(req: Request) {
       }
 
       const fileDoc = files[0];
+      
+      // Create a proper readable stream
       const downloadStream = gfs.openDownloadStream(new mongoose.Types.ObjectId(fileId));
 
+      // Convert stream to buffer properly
       const chunks: Buffer[] = [];
-      await new Promise<void>((resolve, reject) => {
-        downloadStream.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
-        downloadStream.on("end", () => resolve());
-        downloadStream.on("error", (err) => reject(err));
+      
+      return new Promise<Response>((resolve, reject) => {
+        downloadStream.on('data', (chunk) => {
+          chunks.push(chunk);
+        });
+
+        downloadStream.on('end', () => {
+          try {
+            const buffer = Buffer.concat(chunks);
+            const headers = new Headers();
+            
+            // Set proper content type
+            headers.set("Content-Type", fileDoc.contentType || "application/octet-stream");
+            
+            // Set filename for download
+            const filename = fileDoc.filename || `file-${fileId}`;
+            headers.set(
+              "Content-Disposition",
+              `attachment; filename="${encodeURIComponent(filename)}"`
+            );
+            
+            // Set content length
+            headers.set("Content-Length", buffer.length.toString());
+            
+            resolve(new Response(buffer, { 
+              status: 200, 
+              headers 
+            }));
+          } catch (error) {
+            reject(error);
+          }
+        });
+
+        downloadStream.on('error', (err) => {
+          console.error('GridFS download error:', err);
+          reject(new Error('Failed to download file'));
+        });
       });
-
-      const buffer = Buffer.concat(chunks);
-      const headers = new Headers();
-      headers.set("Content-Type", fileDoc.contentType || "application/octet-stream");
-      // Attachment header so browser will download; use original filename if present
-      headers.set(
-        "Content-Disposition",
-        `attachment; filename="${fileDoc.filename?.replace(/"/g, "") || "file"}"`
-      );
-
-      return new Response(buffer, { status: 200, headers });
     }
 
+    // ... rest of your existing task fetching code remains the same
     // ------------- Task single fetch by id -------------
     if (taskId) {
       if (!mongoose.Types.ObjectId.isValid(taskId)) {

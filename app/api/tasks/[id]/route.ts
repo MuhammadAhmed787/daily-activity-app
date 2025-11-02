@@ -1,14 +1,17 @@
+// app/api/tasks/[id]/route.ts
 import { NextResponse } from "next/server"
 import dbConnect from "@/lib/db"
 import Task from "@/models/Task"
 import { writeFile, mkdir, unlink, rm } from "fs/promises"
 import path from "path"
 import { v4 as uuidv4 } from "uuid"
+import mongoose from "mongoose"
+import { getGridFS } from "@/lib/gridfs"
 
 export async function PUT(req: Request, { params }: { params: Promise<{ id: string }> }) {
   await dbConnect();
-  const { id } = await params; // Await params first
-  const taskId = id; // Now use the resolved id
+  const { id } = await params;
+  const taskId = id;
 
   try {
     const contentType = req.headers.get("content-type") || "";
@@ -22,7 +25,6 @@ export async function PUT(req: Request, { params }: { params: Promise<{ id: stri
 
     const formData = await req.formData();
 
-    // Log received data for debugging
     console.log("Received form data fields:");
     for (const [key, value] of formData.entries()) {
       console.log(`${key}: ${value instanceof File ? `File (${value.name}, ${value.size} bytes)` : value}`);
@@ -134,7 +136,7 @@ async function handleGeneralUpdate(taskId: string, formData: FormData) {
         // Write to uploads directory
         const bytes = await file.arrayBuffer();
         const buffer = Buffer.from(bytes);
-        const filename = `${Date.now()}_${file.name}`;
+        const filename = `${Date.now()}_${file.name.replace(/[^a-zA-Z0-9.-]/g, '_')}`;
         const fullPath = path.join(uploadDir, filename);
         
         await writeFile(fullPath, buffer);
@@ -214,23 +216,11 @@ async function handleCompletionUpdate(taskId: string, formData: FormData) {
   let completionAttachmentPaths: string[] = existingTask.completionAttachment || [];
   let rejectionAttachmentPaths: string[] = existingTask.rejectionAttachment || [];
 
-  // Handle new completion files
+  // Handle new completion files - USE GRIDFS FOR CONSISTENCY
   if (completionAttachmentFiles.length > 0) {
-    // Delete old completion files if they exist
-    if (existingTask.completionAttachment && existingTask.completionAttachment.length > 0) {
-      for (const oldFilePath of existingTask.completionAttachment) {
-        try {
-          const fullPath = path.join(process.cwd(), "public", oldFilePath);
-          await unlink(fullPath);
-          console.log("Deleted old completion attachment:", fullPath);
-        } catch (error) {
-          console.warn("Could not delete old completion attachment:", error);
-        }
-      }
-    }
-    
-    // Save new files
     completionAttachmentPaths = [];
+    const gfs = await getGridFS();
+
     for (const file of completionAttachmentFiles) {
       // Validate file type
       const allowedTypes = [
@@ -259,36 +249,35 @@ async function handleCompletionUpdate(taskId: string, formData: FormData) {
         return NextResponse.json({ message: "File size exceeds 10MB" }, { status: 400 });
       }
 
+      // Use GridFS for consistency with other file uploads
       const bytes = await file.arrayBuffer();
       const buffer = Buffer.from(bytes);
-      const ext = path.extname(file.name);
-      const filename = `${uuidv4()}${ext}`;
-      const filePath = `/uploads/completion/${filename}`;
-      const fullPath = path.join(process.cwd(), "public", filePath);
-      await mkdir(path.dirname(fullPath), { recursive: true });
-      await writeFile(fullPath, buffer);
-      completionAttachmentPaths.push(filePath);
-      console.log("New completion attachment saved at:", fullPath);
+
+      const uploadStream = gfs.openUploadStream(file.name, {
+        contentType: file.type || "application/octet-stream",
+        metadata: {
+          originalName: file.name,
+          uploadedAt: new Date(),
+          taskId: taskId,
+          attachmentType: 'completion'
+        },
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.end(buffer);
+        uploadStream.on("finish", () => resolve());
+        uploadStream.on("error", (err) => reject(err));
+      });
+
+      completionAttachmentPaths.push(uploadStream.id.toString());
     }
   }
 
-  // Handle new rejection files
+  // Handle new rejection files - USE GRIDFS FOR CONSISTENCY
   if (rejectionAttachmentFiles.length > 0) {
-    // Delete old rejection files if they exist
-    if (existingTask.rejectionAttachment && existingTask.rejectionAttachment.length > 0) {
-      for (const oldFilePath of existingTask.rejectionAttachment) {
-        try {
-          const fullPath = path.join(process.cwd(), "public", oldFilePath);
-          await unlink(fullPath);
-          console.log("Deleted old rejection attachment:", fullPath);
-        } catch (error) {
-          console.warn("Could not delete old rejection attachment:", error);
-        }
-      }
-    }
-    
-    // Save new files
     rejectionAttachmentPaths = [];
+    const gfs = await getGridFS();
+
     for (const file of rejectionAttachmentFiles) {
       // Validate file type
       const allowedTypes = [
@@ -317,16 +306,27 @@ async function handleCompletionUpdate(taskId: string, formData: FormData) {
         return NextResponse.json({ message: "File size exceeds 10MB" }, { status: 400 });
       }
 
+      // Use GridFS for consistency
       const bytes = await file.arrayBuffer();
       const buffer = Buffer.from(bytes);
-      const ext = path.extname(file.name);
-      const filename = `${uuidv4()}${ext}`;
-      const filePath = `/uploads/rejection/${filename}`;
-      const fullPath = path.join(process.cwd(), "public", filePath);
-      await mkdir(path.dirname(fullPath), { recursive: true });
-      await writeFile(fullPath, buffer);
-      rejectionAttachmentPaths.push(filePath);
-      console.log("New rejection attachment saved at:", fullPath);
+
+      const uploadStream = gfs.openUploadStream(file.name, {
+        contentType: file.type || "application/octet-stream",
+        metadata: {
+          originalName: file.name,
+          uploadedAt: new Date(),
+          taskId: taskId,
+          attachmentType: 'rejection'
+        },
+      });
+
+      await new Promise<void>((resolve, reject) => {
+        uploadStream.end(buffer);
+        uploadStream.on("finish", () => resolve());
+        uploadStream.on("error", (err) => reject(err));
+      });
+
+      rejectionAttachmentPaths.push(uploadStream.id.toString());
     }
   }
 
@@ -364,6 +364,7 @@ async function handleCompletionUpdate(taskId: string, formData: FormData) {
   return NextResponse.json(updatedTask);
 }
 
+// ... rest of your DELETE and GET methods remain the same
 export async function DELETE(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
@@ -445,9 +446,6 @@ export async function DELETE(
   }
 }
 
-// for the unpost adding this previous code is before the update function
-
-// Add this GET method to your existing file
 export async function GET(
   req: Request,
   { params }: { params: Promise<{ id: string }> }
