@@ -191,123 +191,30 @@ export default function AllTasksPage() {
     setCompletionAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
-const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-  // Early validation
-  if (!attachments || attachments.length === 0) {
-    toast({
-      title: "No Files",
-      description: "No attachments available to download",
-      variant: "default",
-    });
-    return;
-  }
+  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder(`${type}-attachments`);
 
-  const toastId = toast({
-    title: "Preparing Download",
-    description: "Starting parallel download...",
-    duration: 2000,
-  });
-
-  try {
-    const zip = new JSZip();
-    const failedDownloads: number[] = [];
-
-    // Download ALL files in true parallel (no batching)
-    const downloadPromises = attachments.map(async (attachment, index) => {
-      try {
-        let fileUrl = attachment;
-        
-        // Handle URL construction - same logic as your developer page
-        if (attachment.startsWith('/')) {
-          fileUrl = `${window.location.origin}${attachment}`;
-        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-          // Use the correct API endpoint for GridFS files
-          fileUrl = `/api/tasks?fileId=${attachment}`;
-        }
-        
-        const response = await fetch(fileUrl);
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        
+      for (let i = 0; i < attachments.length; i++) {
+        const attachment = attachments[i];
+        const response = await fetch(attachment);
         const blob = await response.blob();
-        
-        // Get filename from headers or use default
-        let fileName = `file-${index + 1}`;
-        const contentDisposition = response.headers.get('content-disposition');
-        if (contentDisposition) {
-          const filenameMatch = contentDisposition.match(/filename="(.+)"/);
-          if (filenameMatch) fileName = filenameMatch[1];
-        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-          fileName = `attachment-${index + 1}`;
-        }
-        
-        // Add to zip immediately
-        zip.file(fileName, blob);
-        return { success: true, index };
-      } catch (error) {
-        console.warn(`Failed to download file ${index + 1}:`, error);
-        failedDownloads.push(index + 1);
-        return { success: false, index };
+        const fileName = attachment.split('/').pop() || `file-${i}`;
+        folder?.file(fileName, blob);
       }
-    });
 
-    // Wait for ALL downloads to complete in parallel
-    const results = await Promise.allSettled(downloadPromises);
-    
-    const successCount = results.filter(result => 
-      result.status === 'fulfilled' && result.value?.success === true
-    ).length;
-
-    // Handle results immediately
-    if (successCount === 0) {
+      const content = await zip.generateAsync({ type: "blob" });
+      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
+    } catch (error) {
+      console.error("Error downloading attachments:", error);
       toast({
-        title: "Download Failed",
-        description: "Could not download any files",
+        title: "Download Error",
+        description: "Failed to download attachments. Please try again.",
         variant: "destructive",
       });
-      return;
     }
-
-    // Generate ZIP without compression for maximum speed
-    toast({
-      title: "Creating ZIP",
-      description: "Finalizing download...",
-      duration: 1000,
-    });
-
-    // Use STORE (no compression) for fastest ZIP creation
-    const content = await zip.generateAsync({ 
-      type: "blob",
-      compression: "STORE", // No compression = much faster
-      compressionOptions: { level: 0 }
-    });
-    
-    // Immediate download
-    saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-
-    // Show final result
-    if (failedDownloads.length > 0) {
-      toast({
-        title: "Download Complete",
-        description: `Downloaded ${successCount} files, ${failedDownloads.length} failed`,
-        duration: 2000,
-      });
-    } else {
-      toast({
-        title: "Download Complete",
-        description: `Successfully downloaded ${successCount} files`,
-        duration: 2000,
-      });
-    }
-
-  } catch (error) {
-    console.error("Error in download process:", error);
-    toast({
-      title: "Download Error",
-      description: "Failed to process download. Please try again.",
-      variant: "destructive",
-    });
-  }
-};
+  };
 
   const handleApproveTaskCompletion = async () => {
     if (!selectedTask || !taskStatus) {
@@ -761,35 +668,18 @@ const downloadAllAttachments = async (taskId: string, attachments: string[], typ
                               Download All ({selectedTask.TasksAttachment.length})
                             </Button>
                             <div className="grid gap-1 max-h-20 overflow-y-auto">
-                              {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
-  // Determine the correct download URL
-  let downloadUrl = attachment;
-  if (attachment.startsWith('/')) {
-    downloadUrl = `${window.location.origin}${attachment}`;
-  } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-    downloadUrl = `/api/tasks?fileId=${attachment}`;
-  }
-  
-  return (
-    <a 
-      key={index}
-      href={downloadUrl}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-      onClick={(e) => {
-        // For GridFS files, prevent default and download via API
-        if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-          e.preventDefault();
-          window.open(downloadUrl, '_blank');
-        }
-      }}
-    >
-      <FileText className="h-3 w-3" />
-      File {index + 1}
-    </a>
-  );
-})}
+                              {selectedTask.TasksAttachment.map((attachment: string, index: number) => (
+                                <a 
+                                  key={index}
+                                  href={attachment} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer"
+                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                                >
+                                  <FileText className="h-3 w-3" />
+                                  File {index + 1}
+                                </a>
+                              ))}
                             </div>
                           </div>
                         ) : "None"}
