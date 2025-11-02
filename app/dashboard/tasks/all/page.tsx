@@ -91,115 +91,131 @@ export default function AllTasksPage() {
   };
 
   // Fast parallel download function
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    // Early validation
-    if (!attachments || attachments.length === 0) {
-      toast({
-        title: "No Files",
-        description: "No attachments available to download",
-        variant: "default",
-      });
-      return;
+ const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  // Early validation
+  if (!attachments || attachments.length === 0) {
+    toast({
+      title: "No Files",
+      description: "No attachments available to download",
+      variant: "default",
+    });
+    return;
+  }
+
+  // Debug the attachments first
+  console.log("Downloading attachments:", { taskId, type, attachments });
+
+  const toastId = toast({
+    title: "Preparing Download",
+    description: "Starting download...",
+    duration: 2000,
+  });
+
+  try {
+    const zip = new JSZip();
+    const failedDownloads: string[] = [];
+
+    // Download files with better error handling
+    for (let i = 0; i < attachments.length; i++) {
+      const attachment = attachments[i];
+      
+      try {
+        let fileUrl: string;
+        let fileName: string;
+
+        // Handle different types of attachment strings
+        if (attachment.startsWith('/')) {
+          // Regular file path
+          fileUrl = `${window.location.origin}${attachment}`;
+          fileName = `file-${i + 1}${getFileExtensionFromPath(attachment)}`;
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          // GridFS file ID - use the new dedicated endpoint
+          fileUrl = `/api/files/download?fileId=${attachment}`;
+          fileName = `file-${i + 1}`;
+        } else if (attachment.startsWith('http')) {
+          // Full URL
+          fileUrl = attachment;
+          fileName = `file-${i + 1}`;
+        } else {
+          // Unknown format - try as GridFS ID
+          fileUrl = `/api/files/download?fileId=${attachment}`;
+          fileName = `file-${i + 1}`;
+        }
+
+        console.log(`Downloading file ${i + 1}:`, { fileUrl, fileName });
+
+        const response = await fetch(fileUrl);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const blob = await response.blob();
+        
+        // Check if blob is valid
+        if (blob.size === 0) {
+          throw new Error('Empty file received');
+        }
+
+        // Try to get better filename from response headers
+        const contentDisposition = response.headers.get('content-disposition');
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (filenameMatch && filenameMatch[1]) {
+            fileName = filenameMatch[1];
+          }
+        }
+
+        // Add to zip
+        zip.file(fileName, blob);
+        
+      } catch (error) {
+        console.error(`Failed to download file ${i + 1}:`, error);
+        failedDownloads.push(`File ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
+        // Add an error file to the zip
+        zip.file(`error-file-${i + 1}.txt`, `Failed to download: ${attachment}\nError: ${error}`);
+      }
     }
 
-    const toastId = toast({
-      title: "Preparing Download",
-      description: "Starting parallel download...",
-      duration: 2000,
+    // Generate ZIP
+    const content = await zip.generateAsync({ 
+      type: "blob",
+      compression: "STORE"
     });
+    
+    // Download
+    saveAs(content, `task-${taskId}-${type}-attachments.zip`);
 
-    try {
-      const zip = new JSZip();
-      const failedDownloads: number[] = [];
-
-      // Download ALL files in true parallel (no batching)
-      const downloadPromises = attachments.map(async (attachment, index) => {
-        try {
-          const fileUrl = getDownloadUrl(attachment);
-          
-          const response = await fetch(fileUrl);
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          
-          const blob = await response.blob();
-          
-          // Get filename from headers or use default
-          let fileName = `file-${index + 1}`;
-          const contentDisposition = response.headers.get('content-disposition');
-          if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
-            if (filenameMatch) fileName = filenameMatch[1];
-          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-            fileName = `attachment-${index + 1}`;
-          }
-          
-          // Add to zip immediately
-          zip.file(fileName, blob);
-          return { success: true, index };
-        } catch (error) {
-          console.warn(`Failed to download file ${index + 1}:`, error);
-          failedDownloads.push(index + 1);
-          return { success: false, index };
-        }
-      });
-
-      // Wait for ALL downloads to complete in parallel
-      const results = await Promise.allSettled(downloadPromises);
-      
-      const successCount = results.filter(result => 
-        result.status === 'fulfilled' && result.value?.success === true
-      ).length;
-
-      // Handle results immediately
-      if (successCount === 0) {
-        toast({
-          title: "Download Failed",
-          description: "Could not download any files",
-          variant: "destructive",
-        });
-        return;
-      }
-
-      // Generate ZIP without compression for maximum speed
+    // Show result
+    if (failedDownloads.length > 0) {
       toast({
-        title: "Creating ZIP",
-        description: "Finalizing download...",
-        duration: 1000,
-      });
-
-      // Use STORE (no compression) for fastest ZIP creation
-      const content = await zip.generateAsync({ 
-        type: "blob",
-        compression: "STORE",
-        compressionOptions: { level: 0 }
-      });
-      
-      // Immediate download
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-
-      // Show final result
-      if (failedDownloads.length > 0) {
-        toast({
-          title: "Download Complete",
-          description: `Downloaded ${successCount} files, ${failedDownloads.length} failed`,
-          duration: 2000,
-        });
-      } else {
-        toast({
-          title: "Download Complete",
-          description: `Successfully downloaded ${successCount} files`,
-          duration: 2000,
-        });
-      }
-
-    } catch (error) {
-      console.error("Error in download process:", error);
-      toast({
-        title: "Download Error",
-        description: "Failed to process download. Please try again.",
+        title: "Download Complete with Errors",
+        description: `Downloaded ${attachments.length - failedDownloads.length} files, ${failedDownloads.length} failed`,
         variant: "destructive",
       });
+    } else {
+      toast({
+        title: "Download Complete",
+        description: `Successfully downloaded ${attachments.length} files`,
+        duration: 2000,
+      });
     }
-  };
+
+  } catch (error) {
+    console.error("Error in download process:", error);
+    toast({
+      title: "Download Error",
+      description: "Failed to process download. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
+
+// Helper function to get file extension from path
+const getFileExtensionFromPath = (path: string): string => {
+  const match = path.match(/\.([a-zA-Z0-9]+)$/);
+  return match ? `.${match[1]}` : '';
+};
 
   useEffect(() => {
     const userData = localStorage.getItem("user")
@@ -774,19 +790,36 @@ export default function AllTasksPage() {
                               Download All ({selectedTask.TasksAttachment.length})
                             </Button>
                             <div className="grid gap-1 max-h-20 overflow-y-auto">
-                              {selectedTask.TasksAttachment.map((attachment: string, index: number) => (
-                                <a 
-                                  key={index}
-                                  href={getDownloadUrl(attachment)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="text-blue-600 hover:underline text-xs flex items-center gap-1"
-                                  onClick={(e) => handleFileClick(e, attachment)}
-                                >
-                                  <FileText className="h-3 w-3" />
-                                  File {index + 1}
-                                </a>
-                              ))}
+                              {selectedTask.TasksAttachment.map((attachment: string, index: number) => {
+  let fileUrl: string;
+  let onClickHandler: ((e: React.MouseEvent) => void) | undefined;
+
+  if (attachment.startsWith('/')) {
+    fileUrl = `${window.location.origin}${attachment}`;
+  } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+    fileUrl = `/api/files/download?fileId=${attachment}`;
+    onClickHandler = (e: React.MouseEvent) => {
+      e.preventDefault();
+      window.open(fileUrl, '_blank');
+    };
+  } else {
+    fileUrl = attachment;
+  }
+
+  return (
+    <a 
+      key={index}
+      href={fileUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+      onClick={onClickHandler}
+    >
+      <FileText className="h-3 w-3" />
+      File {index + 1}
+    </a>
+  );
+})}
                             </div>
                           </div>
                         ) : "None"}
