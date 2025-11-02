@@ -71,6 +71,136 @@ export default function AllTasksPage() {
   const [user, setUser] = useState<UserSession | null>(null)
   const [eventSource, setEventSource] = useState<EventSource | null>(null)
 
+  // Helper function to get download URL for any attachment
+  const getDownloadUrl = (attachment: string): string => {
+    if (attachment.startsWith('/')) {
+      return `${window.location.origin}${attachment}`;
+    } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+      return `/api/tasks?fileId=${attachment}`;
+    }
+    return attachment;
+  };
+
+  // Helper function to handle individual file click
+  const handleFileClick = (e: React.MouseEvent, attachment: string) => {
+    if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+      e.preventDefault();
+      const downloadUrl = getDownloadUrl(attachment);
+      window.open(downloadUrl, '_blank');
+    }
+  };
+
+  // Fast parallel download function
+  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+    // Early validation
+    if (!attachments || attachments.length === 0) {
+      toast({
+        title: "No Files",
+        description: "No attachments available to download",
+        variant: "default",
+      });
+      return;
+    }
+
+    const toastId = toast({
+      title: "Preparing Download",
+      description: "Starting parallel download...",
+      duration: 2000,
+    });
+
+    try {
+      const zip = new JSZip();
+      const failedDownloads: number[] = [];
+
+      // Download ALL files in true parallel (no batching)
+      const downloadPromises = attachments.map(async (attachment, index) => {
+        try {
+          const fileUrl = getDownloadUrl(attachment);
+          
+          const response = await fetch(fileUrl);
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          
+          const blob = await response.blob();
+          
+          // Get filename from headers or use default
+          let fileName = `file-${index + 1}`;
+          const contentDisposition = response.headers.get('content-disposition');
+          if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="(.+)"/);
+            if (filenameMatch) fileName = filenameMatch[1];
+          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+            fileName = `attachment-${index + 1}`;
+          }
+          
+          // Add to zip immediately
+          zip.file(fileName, blob);
+          return { success: true, index };
+        } catch (error) {
+          console.warn(`Failed to download file ${index + 1}:`, error);
+          failedDownloads.push(index + 1);
+          return { success: false, index };
+        }
+      });
+
+      // Wait for ALL downloads to complete in parallel
+      const results = await Promise.allSettled(downloadPromises);
+      
+      const successCount = results.filter(result => 
+        result.status === 'fulfilled' && result.value?.success === true
+      ).length;
+
+      // Handle results immediately
+      if (successCount === 0) {
+        toast({
+          title: "Download Failed",
+          description: "Could not download any files",
+          variant: "destructive",
+        });
+        return;
+      }
+
+      // Generate ZIP without compression for maximum speed
+      toast({
+        title: "Creating ZIP",
+        description: "Finalizing download...",
+        duration: 1000,
+      });
+
+      // Use STORE (no compression) for fastest ZIP creation
+      const content = await zip.generateAsync({ 
+        type: "blob",
+        compression: "STORE",
+        compressionOptions: { level: 0 }
+      });
+      
+      // Immediate download
+      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
+
+      // Show final result
+      if (failedDownloads.length > 0) {
+        toast({
+          title: "Download Complete",
+          description: `Downloaded ${successCount} files, ${failedDownloads.length} failed`,
+          duration: 2000,
+        });
+      } else {
+        toast({
+          title: "Download Complete",
+          description: `Successfully downloaded ${successCount} files`,
+          duration: 2000,
+        });
+      }
+
+    } catch (error) {
+      console.error("Error in download process:", error);
+      toast({
+        title: "Download Error",
+        description: "Failed to process download. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
   useEffect(() => {
     const userData = localStorage.getItem("user")
     if (!userData) {
@@ -189,31 +319,6 @@ export default function AllTasksPage() {
 
   const removeFile = (index: number) => {
     setCompletionAttachments(prev => prev.filter((_, i) => i !== index));
-  };
-
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    try {
-      const zip = new JSZip();
-      const folder = zip.folder(`${type}-attachments`);
-
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        const response = await fetch(attachment);
-        const blob = await response.blob();
-        const fileName = attachment.split('/').pop() || `file-${i}`;
-        folder?.file(fileName, blob);
-      }
-
-      const content = await zip.generateAsync({ type: "blob" });
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-    } catch (error) {
-      console.error("Error downloading attachments:", error);
-      toast({
-        title: "Download Error",
-        description: "Failed to download attachments. Please try again.",
-        variant: "destructive",
-      });
-    }
   };
 
   const handleApproveTaskCompletion = async () => {
@@ -650,6 +755,7 @@ export default function AllTasksPage() {
                         </td>
                       </tr>
                     )}
+                    {/* Task Attachments */}
                     <tr>
                       <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
                         <Paperclip className="h-3 w-3 text-gray-500" /> Task Attachments
@@ -671,10 +777,11 @@ export default function AllTasksPage() {
                               {selectedTask.TasksAttachment.map((attachment: string, index: number) => (
                                 <a 
                                   key={index}
-                                  href={attachment} 
-                                  target="_blank" 
+                                  href={getDownloadUrl(attachment)}
+                                  target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                                  onClick={(e) => handleFileClick(e, attachment)}
                                 >
                                   <FileText className="h-3 w-3" />
                                   File {index + 1}
@@ -685,6 +792,7 @@ export default function AllTasksPage() {
                         ) : "None"}
                       </td>
                     </tr>
+                    {/* Assignment Attachments */}
                     <tr>
                       <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
                         <Paperclip className="h-3 w-3 text-gray-500" /> Assignment Attachments
@@ -706,10 +814,11 @@ export default function AllTasksPage() {
                               {selectedTask.assignmentAttachment.map((attachment: string, index: number) => (
                                 <a 
                                   key={index}
-                                  href={attachment} 
-                                  target="_blank" 
+                                  href={getDownloadUrl(attachment)}
+                                  target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                                  onClick={(e) => handleFileClick(e, attachment)}
                                 >
                                   <FileText className="h-3 w-3" />
                                   File {index + 1}
@@ -738,6 +847,7 @@ export default function AllTasksPage() {
                       </td>
                       <td className="p-2 sm:p-3 break-words">{selectedTask.developer_remarks || "None"}</td>
                     </tr>
+                    {/* Developer Attachments */}
                     <tr>
                       <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
                         <Paperclip className="h-3 w-3 text-gray-500" /> Developer Attachments
@@ -759,10 +869,11 @@ export default function AllTasksPage() {
                               {selectedTask.developer_attachment.map((attachment: string, index: number) => (
                                 <a 
                                   key={index}
-                                  href={attachment} 
-                                  target="_blank" 
+                                  href={getDownloadUrl(attachment)}
+                                  target="_blank"
                                   rel="noopener noreferrer"
                                   className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                                  onClick={(e) => handleFileClick(e, attachment)}
                                 >
                                   <FileText className="h-3 w-3" />
                                   File {index + 1}
@@ -781,6 +892,7 @@ export default function AllTasksPage() {
                           </td>
                           <td className="p-2 sm:p-3 break-words">{selectedTask.rejectionRemarks || "None"}</td>
                         </tr>
+                        {/* Rejection Attachments */}
                         <tr>
                           <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
                             <Paperclip className="h-3 w-3 text-gray-500" /> Rejection Attachments
@@ -802,10 +914,11 @@ export default function AllTasksPage() {
                                   {selectedTask.rejectionAttachment.map((attachment: string, index: number) => (
                                     <a 
                                       key={index}
-                                      href={attachment} 
-                                      target="_blank" 
+                                      href={getDownloadUrl(attachment)}
+                                      target="_blank"
                                       rel="noopener noreferrer"
                                       className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                                      onClick={(e) => handleFileClick(e, attachment)}
                                     >
                                       <FileText className="h-3 w-3" />
                                       File {index + 1}
@@ -822,6 +935,7 @@ export default function AllTasksPage() {
                           </td>
                           <td className="p-2 sm:p-3 break-words">{selectedTask.developer_rejection_remarks || "None"}</td>
                         </tr>
+                        {/* Developer Rejection Solve Attachments */}
                         <tr>
                           <td className="p-2 sm:p-3 font-medium w-[100px] sm:w-[120px] shrink-0 flex items-center gap-1 text-xs sm:text-sm">
                             <Paperclip className="h-3 w-3 text-gray-500" /> Developer Rejection Solve Attachments
@@ -843,10 +957,11 @@ export default function AllTasksPage() {
                                   {selectedTask.developer_rejection_solve_attachment.map((attachment: string, index: number) => (
                                     <a 
                                       key={index}
-                                      href={attachment} 
-                                      target="_blank" 
+                                      href={getDownloadUrl(attachment)}
+                                      target="_blank"
                                       rel="noopener noreferrer"
                                       className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+                                      onClick={(e) => handleFileClick(e, attachment)}
                                     >
                                       <FileText className="h-3 w-3" />
                                       File {index + 1}
