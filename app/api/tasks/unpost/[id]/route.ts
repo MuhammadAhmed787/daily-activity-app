@@ -1,15 +1,161 @@
 import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
-import Task, { ITask } from "@/models/Task";
+import Task from "@/models/Task";
 import { writeFile, mkdir, unlink } from "fs/promises";
 import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import mongoose from "mongoose";
+import { GridFSBucket } from "mongodb";
+
 
 // Define the context type for dynamic route parameters
 interface RouteContext {
   params: Promise<{ id: string }>;
 }
+
+// Helper function to normalize arrays
+const normalizeArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) {
+    return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+  }
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      const parsed = JSON.parse(value);
+      if (Array.isArray(parsed)) {
+        return parsed.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+      }
+      return [value].filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+    } catch {
+      return [value].filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+    }
+  }
+  return [];
+};
+
+// Helper function to upload files to GridFS
+const uploadToGridFS = async (file: File): Promise<string> => {
+  try {
+    const bytes = await file.arrayBuffer();
+    const buffer = Buffer.from(bytes);
+    
+    const db = mongoose.connection.db;
+    if (!db) {
+      throw new Error("Database connection failed");
+    }
+
+    const bucket = new GridFSBucket(db, { bucketName: "uploads" });
+    
+    return new Promise((resolve, reject) => {
+      const uploadStream = bucket.openUploadStream(file.name, {
+        contentType: file.type,
+      });
+
+      uploadStream.on("finish", () => {
+        resolve(uploadStream.id.toString());
+      });
+
+      uploadStream.on("error", (error) => {
+        reject(error);
+      });
+
+      uploadStream.end(buffer);
+    });
+  } catch (error) {
+    console.error("Error uploading to GridFS:", error);
+    throw error;
+  }
+};
+
+// Helper function to handle file uploads (both local and GridFS)
+const handleFileUploads = async (files: File[]): Promise<{ filePaths: string[]; errors: string[] }> => {
+  const filePaths: string[] = [];
+  const errors: string[] = [];
+
+  // Define allowed file types and extensions
+  const allowedTypes = [
+    "application/pdf", 
+    "image/jpeg", 
+    "image/png", 
+    "image/gif",
+    "image/bmp",
+    "text/plain",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "text/csv",
+    "application/rtf",
+    "application/vnd.oasis.opendocument.text",
+    "application/vnd.oasis.opendocument.spreadsheet",
+    "application/vnd.oasis.opendocument.presentation"
+  ];
+
+  const allowedExtensions = [
+    '.txt', '.doc', '.docx', '.xls', '.xlsx', '.pdf', 
+    '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.csv', 
+    '.rtf', '.odt', '.ods', '.odp'
+  ];
+
+  for (const file of files) {
+    if (file.size > 0) {
+      try {
+        // Get file extension
+        const ext = path.extname(file.name).toLowerCase();
+        
+        // Check if file type is allowed
+        const isTypeAllowed = allowedTypes.includes(file.type);
+        const isExtensionAllowed = allowedExtensions.includes(ext);
+        
+        if (!isTypeAllowed && !isExtensionAllowed) {
+          errors.push(`File type not allowed: ${file.name}. Allowed types: ${allowedExtensions.join(', ')}`);
+          continue;
+        }
+
+        // Check file size (10MB limit)
+        if (file.size > 10 * 1024 * 1024) {
+          errors.push(`File size exceeds 10MB limit: ${file.name}`);
+          continue;
+        }
+
+        // Try to upload to GridFS first
+        try {
+          const fileId = await uploadToGridFS(file);
+          filePaths.push(fileId);
+        } catch (gridFSError) {
+          console.warn(`GridFS upload failed for ${file.name}, falling back to local storage:`, gridFSError);
+          
+          // Fallback to local file system
+          const bytes = await file.arrayBuffer();
+          const buffer = Buffer.from(bytes);
+          const filename = `${uuidv4()}${ext}`;
+          const filePath = `/uploads/tasks/${filename}`;
+          const fullPath = path.join(process.cwd(), "public", filePath);
+
+          await mkdir(path.dirname(fullPath), { recursive: true });
+          await writeFile(fullPath, buffer);
+
+          filePaths.push(filePath);
+        }
+      } catch (error) {
+        console.error(`Error processing file ${file.name}:`, error);
+        errors.push(`Failed to process file: ${file.name}`);
+      }
+    }
+  }
+
+  return { filePaths, errors };
+};
+
+// Helper function to get existing attachments from form data
+const getExistingAttachments = (formData: FormData, fieldName: string): string[] => {
+  const attachments: string[] = [];
+  for (const [key, value] of formData.entries()) {
+    if (key.startsWith(fieldName) && typeof value === 'string') {
+      attachments.push(value);
+    }
+  }
+  return attachments.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+};
 
 export async function PUT(req: Request, context: RouteContext) {
   await dbConnect();
@@ -18,7 +164,7 @@ export async function PUT(req: Request, context: RouteContext) {
   try {
     const formData = await req.formData();
 
-    // Extract fields
+    // Extract fields from form data
     const code = formData.get("code") as string | null;
     const company = formData.get("company") as string | null;
     const contact = formData.get("contact") as string | null;
@@ -43,98 +189,11 @@ export async function PUT(req: Request, context: RouteContext) {
       return NextResponse.json({ message: "Missing taskId" }, { status: 400 });
     }
 
+    // Find existing task
     const existingTask = await Task.findById(taskId);
     if (!existingTask) {
       return NextResponse.json({ message: "Task not found" }, { status: 404 });
     }
-
-    // Normalize array for attachments
-    const normalizeArray = (value: unknown): string[] => {
-      if (Array.isArray(value)) return value.map(String);
-      if (typeof value === "string" && value.trim() !== "") {
-        try {
-          const parsed = JSON.parse(value);
-          if (Array.isArray(parsed)) return parsed.map(String);
-          return [value];
-        } catch {
-          return [value];
-        }
-      }
-      return [];
-    };
-
-    // Handle multiple file attachments with enhanced file type support
-    const handleMultipleAttachments = async (
-      newFiles: File[],
-      existingFilePaths: unknown,
-      fieldName: string
-    ): Promise<{ filePaths: string[]; error?: string }> => {
-      let filePaths: string[] = normalizeArray(existingFilePaths);
-
-      // Define allowed file types and extensions
-      const allowedTypes = [
-        "application/pdf", 
-        "image/jpeg", 
-        "image/png", 
-        "image/gif",
-        "image/bmp",
-        "text/plain",
-        "application/msword",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "application/vnd.ms-excel",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "text/csv",
-        "application/rtf",
-        "application/vnd.oasis.opendocument.text",
-        "application/vnd.oasis.opendocument.spreadsheet",
-        "application/vnd.oasis.opendocument.presentation"
-      ];
-
-      const allowedExtensions = [
-        '.txt', '.doc', '.docx', '.xls', '.xlsx', '.pdf', 
-        '.png', '.jpg', '.jpeg', '.gif', '.bmp', '.csv', 
-        '.rtf', '.odt', '.ods', '.odp'
-      ];
-
-      for (const newFile of newFiles) {
-        if (newFile.size > 0) {
-          // Get file extension
-          const ext = path.extname(newFile.name).toLowerCase();
-          
-          // Check if file type is allowed
-          const isTypeAllowed = allowedTypes.includes(newFile.type);
-          const isExtensionAllowed = allowedExtensions.includes(ext);
-          
-          if (!isTypeAllowed && !isExtensionAllowed) {
-            return {
-              filePaths,
-              error: `File type not allowed for ${fieldName}. Allowed types: ${allowedExtensions.join(', ')}`,
-            };
-          }
-
-          // Check file size (10MB limit)
-          if (newFile.size > 10 * 1024 * 1024) {
-            return {
-              filePaths,
-              error: `File size exceeds 10MB limit for ${fieldName}`,
-            };
-          }
-
-          const bytes = await newFile.arrayBuffer();
-          const buffer = Buffer.from(bytes);
-          const filename = `${uuidv4()}${ext}`;
-          const filePath = `/uploads/tasks/${filename}`;
-          const fullPath = path.join(process.cwd(), "public", filePath);
-
-          await mkdir(path.dirname(fullPath), { recursive: true });
-          await writeFile(fullPath, buffer);
-
-          filePaths = [...filePaths, filePath];
-        }
-      }
-
-      return { filePaths };
-    };
 
     // Process file uploads
     const taskFiles = formData.getAll("TasksAttachment") as File[];
@@ -143,198 +202,174 @@ export async function PUT(req: Request, context: RouteContext) {
     const developerFiles = formData.getAll("developerAttachment") as File[];
 
     // Get existing attachments from form data
-    const getExistingAttachments = (formData: FormData, fieldName: string): string[] => {
-      const attachments: string[] = [];
-      for (const [key, value] of formData.entries()) {
-        if (key.startsWith(fieldName) && typeof value === 'string') {
-          attachments.push(value);
-        }
-      }
-      return attachments;
-    };
-
     const existingTasksAttachments = getExistingAttachments(formData, 'existingTasksAttachment');
     const existingAssignmentAttachments = getExistingAttachments(formData, 'existingAssignmentAttachment');
     const existingCompletionAttachments = getExistingAttachments(formData, 'existingCompletionAttachment');
     const existingDeveloperAttachments = getExistingAttachments(formData, 'existingDeveloperAttachment');
 
     // Handle file uploads with existing attachments
-    const tasksAttachmentResult = await handleMultipleAttachments(
-      taskFiles,
-      existingTasksAttachments,
-      "TasksAttachment"
-    );
-    if (tasksAttachmentResult.error)
+    const tasksAttachmentResult = await handleFileUploads(taskFiles);
+    if (tasksAttachmentResult.errors.length > 0) {
       return NextResponse.json(
-        { message: tasksAttachmentResult.error },
+        { message: `File upload errors: ${tasksAttachmentResult.errors.join(', ')}` },
         { status: 400 }
       );
+    }
 
-    const assignmentAttachmentResult = await handleMultipleAttachments(
-      assignmentFiles,
-      existingAssignmentAttachments,
-      "assignmentAttachment"
-    );
-    if (assignmentAttachmentResult.error)
+    const assignmentAttachmentResult = await handleFileUploads(assignmentFiles);
+    if (assignmentAttachmentResult.errors.length > 0) {
       return NextResponse.json(
-        { message: assignmentAttachmentResult.error },
+        { message: `File upload errors: ${assignmentAttachmentResult.errors.join(', ')}` },
         { status: 400 }
       );
+    }
 
-    const completionAttachmentResult = await handleMultipleAttachments(
-      completionFiles,
-      existingCompletionAttachments,
-      "completionAttachment"
-    );
-    if (completionAttachmentResult.error)
+    const completionAttachmentResult = await handleFileUploads(completionFiles);
+    if (completionAttachmentResult.errors.length > 0) {
       return NextResponse.json(
-        { message: completionAttachmentResult.error },
+        { message: `File upload errors: ${completionAttachmentResult.errors.join(', ')}` },
         { status: 400 }
       );
+    }
 
-    const developerAttachmentResult = await handleMultipleAttachments(
-      developerFiles,
-      existingDeveloperAttachments,
-      "developer_attachment"
-    );
-    if (developerAttachmentResult.error)
+    const developerAttachmentResult = await handleFileUploads(developerFiles);
+    if (developerAttachmentResult.errors.length > 0) {
       return NextResponse.json(
-        { message: developerAttachmentResult.error },
+        { message: `File upload errors: ${developerAttachmentResult.errors.join(', ')}` },
         { status: 400 }
       );
+    }
 
-    // Delete removed attachments from server
-    const deleteRemovedAttachments = async (currentAttachments: string[], newAttachments: string[]) => {
-      const attachmentsToDelete = currentAttachments.filter(attachment => !newAttachments.includes(attachment));
-      
-      for (const attachment of attachmentsToDelete) {
-        try {
-          const fullPath = path.join(process.cwd(), "public", attachment);
-          await unlink(fullPath);
-          console.log(`Deleted attachment: ${attachment}`);
-        } catch (error) {
-          console.error(`Error deleting attachment ${attachment}:`, error);
-        }
-      }
-    };
-
-    // Delete removed attachments for each type
-    await deleteRemovedAttachments(
-      normalizeArray(existingTask.TasksAttachment),
-      tasksAttachmentResult.filePaths
-    );
-    
-    await deleteRemovedAttachments(
-      normalizeArray(existingTask.assignmentAttachment),
-      assignmentAttachmentResult.filePaths
-    );
-    
-    await deleteRemovedAttachments(
-      normalizeArray(existingTask.completionAttachment),
-      completionAttachmentResult.filePaths
-    );
-    
-    await deleteRemovedAttachments(
-      normalizeArray(existingTask.developer_attachment),
-      developerAttachmentResult.filePaths
-    );
+    // Combine existing and new attachments
+    const finalTaskAttachments = [...existingTasksAttachments, ...tasksAttachmentResult.filePaths];
+    const finalAssignmentAttachments = [...existingAssignmentAttachments, ...assignmentAttachmentResult.filePaths];
+    const finalCompletionAttachments = [...existingCompletionAttachments, ...completionAttachmentResult.filePaths];
+    const finalDeveloperAttachments = [...existingDeveloperAttachments, ...developerAttachmentResult.filePaths];
 
     // Validate required fields
     if (!code && !existingTask.code) {
       return NextResponse.json({ message: "Code is required" }, { status: 400 });
     }
-    if (!company && !existingTask.company) {
-      return NextResponse.json({ message: "Company is required" }, { status: 400 });
-    }
-    if (!contact && !existingTask.contact) {
-      return NextResponse.json({ message: "Contact is required" }, { status: 400 });
-    }
     if (!working && !existingTask.working) {
-      return NextResponse.json({ message: "Working is required" }, { status: 400 });
+      return NextResponse.json({ message: "Work description is required" }, { status: 400 });
     }
     if (!dateTime && !existingTask.dateTime) {
-      return NextResponse.json({ message: "DateTime is required" }, { status: 400 });
+      return NextResponse.json({ message: "Date and time is required" }, { status: 400 });
     }
 
-    // Parse company
+    // Parse company data
     let companyData = existingTask.company;
     if (company) {
       try {
-        const parsed = JSON.parse(company);
+        const parsedCompany = JSON.parse(company);
         companyData = {
-          id: parsed.id ? new mongoose.Types.ObjectId(parsed.id) : existingTask.company.id,
-          name: parsed.name || existingTask.company.name,
-          city: parsed.city || existingTask.company.city,
-          address: parsed.address || existingTask.company.address,
+          id: parsedCompany.id ? new mongoose.Types.ObjectId(parsedCompany.id) : existingTask.company.id,
+          name: parsedCompany.name || existingTask.company.name,
+          city: parsedCompany.city || existingTask.company.city,
+          address: parsedCompany.address || existingTask.company.address,
+          companyRepresentative: parsedCompany.companyRepresentative || existingTask.company.companyRepresentative || "",
+          support: parsedCompany.support || existingTask.company.support || "",
         };
       } catch (e) {
-        return NextResponse.json(
-          { message: "Invalid company format: must be valid JSON" },
-          { status: 400 }
-        );
+        console.error("Error parsing company data:", e);
+        // Keep existing company data if parsing fails
       }
     }
 
-    // Parse contact
+    // Parse contact data
     let contactData = existingTask.contact;
     if (contact) {
       try {
-        contactData = JSON.parse(contact);
-        if (!contactData.name || !contactData.phone) {
-          return NextResponse.json(
-            { message: "Contact must include name and phone" },
-            { status: 400 }
-          );
-        }
+        const parsedContact = JSON.parse(contact);
+        contactData = {
+          name: parsedContact.name || existingTask.contact.name,
+          phone: parsedContact.phone || existingTask.contact.phone,
+        };
       } catch (e) {
-        return NextResponse.json(
-          { message: "Invalid contact format: must be valid JSON" },
-          { status: 400 }
-        );
+        console.error("Error parsing contact data:", e);
+        // Keep existing contact data if parsing fails
       }
     }
 
-    // Parse assignedTo
+    // Parse assignedTo data
     let assignedToData = existingTask.assignedTo;
-    if (assignedTo && assignedTo !== "null" && assignedTo !== "") {
+    if (assignedTo && assignedTo !== "null" && assignedTo !== "" && assignedTo !== "unassigned") {
       try {
         if (typeof assignedTo === "string") {
           if (assignedTo.trim() && (assignedTo.startsWith("{") || assignedTo.startsWith("["))) {
+            // It's a JSON string
             assignedToData = JSON.parse(assignedTo);
-            if (
-              !assignedToData.id ||
-              !assignedToData.username ||
-              !assignedToData.name ||
-              !assignedToData.role?.name
-            ) {
-              return NextResponse.json(
-                { message: "Invalid assignedTo format: must include id, username, name, and role.name" },
-                { status: 400 }
-              );
-            }
           } else {
-            return NextResponse.json(
-              { message: "Invalid assignedTo format: must be valid JSON" },
-              { status: 400 }
-            );
+            // It's a user ID, try to find the user
+            const User = mongoose.models.User || mongoose.model("User", new mongoose.Schema({}, { strict: false }));
+
+// Use lean() to get a plain object, then defensively check its shape.
+// Some mongoose typings or older model definitions can cause the result
+// to be typed as `T | T[]`, so we check for arrays and the presence of `_id`.
+const maybeUser = await User.findById(assignedTo).lean();
+
+if (maybeUser && !Array.isArray(maybeUser) && typeof maybeUser === "object" && "_id" in maybeUser) {
+  // Narrowed at runtime, safe to access properties
+  const userObj = maybeUser as { _id: { toString(): string }; username?: string; name?: string; role?: { name?: string } };
+
+  assignedToData = {
+    id: userObj._id.toString(),
+    username: userObj.username || "unknown",
+    name: userObj.name || "Unknown",
+    role: { name: userObj.role?.name || "user" },
+  };
+} else {
+  // If not found, or unexpected shape, clear assignedToData
+  assignedToData = undefined;
+}
           }
-        } else {
-          assignedToData = assignedTo;
         }
       } catch (e) {
-        console.error("Error parsing assignedTo:", e, "Input:", assignedTo);
-        return NextResponse.json(
-          { message: "Failed to parse assignedTo: invalid JSON format" },
-          { status: 400 }
-        );
+        console.error("Error parsing assignedTo data:", e);
+        // Keep existing assignedTo data if parsing fails
       }
     } else {
-      assignedToData = null; // Allow null if assignedTo is not provided
+      // Clear assignedTo if unassigned or empty
+      assignedToData = undefined;
+    }
+
+    // Prepare update data
+    const updateData: any = {
+      code: code || existingTask.code,
+      company: companyData,
+      contact: contactData,
+      working: working || existingTask.working,
+      dateTime: dateTime ? new Date(dateTime) : existingTask.dateTime,
+      status: status || "unposted",
+      assigned: assigned === "true",
+      approved: approved === "true",
+      completionApproved: completionApproved === "true",
+      unposted: unposted === "true",
+      UnpostStatus: UnpostStatus || "unposted",
+      TaskRemarks: TaskRemarks || existingTask.TaskRemarks || "",
+      TasksAttachment: finalTaskAttachments,
+      assignmentRemarks: assignmentRemarks || existingTask.assignmentRemarks || "",
+      assignmentAttachment: finalAssignmentAttachments,
+      completionRemarks: completionRemarks || existingTask.completionRemarks || "",
+      completionAttachment: finalCompletionAttachments,
+      developer_remarks: developer_remarks || existingTask.developer_remarks || "",
+      developer_status: developer_status || existingTask.developer_status || "pending",
+      developer_attachment: finalDeveloperAttachments,
+      updatedAt: new Date(),
+    };
+
+    // Add optional fields if they exist
+    if (assignedToData) updateData.assignedTo = assignedToData;
+    if (approvedAt) updateData.approvedAt = new Date(approvedAt);
+    if (assignedDate) updateData.assignedDate = new Date(assignedDate);
+    if (unposted === "true") {
+      updateData.unpostedAt = new Date();
+      updateData.finalStatus = "unposted";
     }
 
     // Validate status and developer_status
-    const validStatuses = ["pending", "assigned", "approved", "completed", "on-hold", "unposted"];
-    if (status && !validStatuses.includes(status)) {
+    const validStatuses = ["pending", "assigned", "approved", "completed", "on-hold", "unposted", "in-progress", "rejected"];
+    if (updateData.status && !validStatuses.includes(updateData.status)) {
       return NextResponse.json(
         { message: `Invalid status: must be one of ${validStatuses.join(", ")}` },
         { status: 400 }
@@ -342,43 +377,14 @@ export async function PUT(req: Request, context: RouteContext) {
     }
 
     const validDeveloperStatuses = ["pending", "done", "not-done", "on-hold"];
-    if (developer_status && !validDeveloperStatuses.includes(developer_status)) {
+    if (updateData.developer_status && !validDeveloperStatuses.includes(updateData.developer_status)) {
       return NextResponse.json(
         { message: `Invalid developer_status: must be one of ${validDeveloperStatuses.join(", ")}` },
         { status: 400 }
       );
     }
 
-    // Prepare update object
-    const updateData: Partial<ITask> = {
-      code: code || existingTask.code,
-      company: companyData,
-      contact: contactData,
-      working: working || existingTask.working,
-      dateTime: dateTime || existingTask.dateTime,
-      status: status || existingTask.status,
-      assigned: assigned === "true",
-      assignedTo: assignedToData ?? existingTask.assignedTo,
-      approved: approved === "true",
-      completionApproved: completionApproved === "true",
-      unposted: unposted === "true",
-      UnpostStatus: UnpostStatus || existingTask.UnpostStatus || "",
-      TaskRemarks: TaskRemarks || existingTask.TaskRemarks || "",
-      TasksAttachment: tasksAttachmentResult.filePaths,
-      assignmentRemarks: assignmentRemarks || existingTask.assignmentRemarks || "",
-      assignmentAttachment: assignmentAttachmentResult.filePaths,
-      completionRemarks: completionRemarks || existingTask.completionRemarks || "",
-      completionAttachment: completionAttachmentResult.filePaths,
-      developer_remarks: developer_remarks || existingTask.developer_remarks || "",
-      developer_status: developer_status || existingTask.developer_status || "",
-      developer_attachment: developerAttachmentResult.filePaths,
-      approvedAt: approvedAt || existingTask.approvedAt,
-      assignedDate: assignedDate || existingTask.assignedDate,
-      unpostedAt: unposted === "true" ? new Date().toISOString() : existingTask.unpostedAt,
-      updatedAt: new Date().toISOString(),
-    };
-
-    // Update task
+    // Update the task
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       { $set: updateData },
@@ -395,6 +401,32 @@ export async function PUT(req: Request, context: RouteContext) {
     const errorMessage = error instanceof Error ? error.message : String(error);
     return NextResponse.json(
       { message: "Failed to update task", error: errorMessage },
+      { status: 500 }
+    );
+  }
+}
+
+// Also add GET method to fetch a single task
+export async function GET(req: Request, context: RouteContext) {
+  await dbConnect();
+  const { id: taskId } = await context.params;
+
+  try {
+    if (!taskId) {
+      return NextResponse.json({ message: "Missing taskId" }, { status: 400 });
+    }
+
+    const task = await Task.findById(taskId).lean();
+    if (!task) {
+      return NextResponse.json({ message: "Task not found" }, { status: 404 });
+    }
+
+    return NextResponse.json(task);
+  } catch (error) {
+    console.error("Error fetching task:", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    return NextResponse.json(
+      { message: "Failed to fetch task", error: errorMessage },
       { status: 500 }
     );
   }
