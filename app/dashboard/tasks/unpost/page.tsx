@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Building, Archive, Edit, Loader2, FileText, X, Trash2, Download } from "lucide-react";
+import { Building, Archive, Edit, Loader2, FileText, X, Trash2, Download, User } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
@@ -245,10 +245,13 @@ export default function UnpostTasksPage() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const data = await response.json();
-      // Filter users with developer role
-      const developerUsers = data.filter((user: Developer) =>
-        user.role && user.role.name === "developer"
+      console.log("Developers API response:", data); // Debug log
+      
+      // Filter users with developer role and ensure they have required fields
+      const developerUsers = data.filter((user: any) =>
+        user.role && user.role.name === "developer" && user._id && user.username && user.name
       );
+      console.log("Filtered developers:", developerUsers); // Debug log
       setDevelopers(developerUsers);
     } catch (error) {
       console.error("Failed to fetch developers:", error);
@@ -268,11 +271,23 @@ export default function UnpostTasksPage() {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
       const data: ITask[] = await response.json();
+      console.log("Tasks API response:", data); // Debug log
+      
       const normalizedTasks = data.map((task: ITask) => ({
         ...task,
         company: task.company && task.company.name && task.company.city && task.company.address
-          ? task.company
-          : { id: "", name: "N/A", city: "N/A", address: "N/A", companyRepresentative: "", support: "" },
+          ? {
+              ...task.company,
+              id: task.company.id?.toString() || ""
+            }
+          : { 
+              id: "", 
+              name: "N/A", 
+              city: "N/A", 
+              address: "N/A", 
+              companyRepresentative: "", 
+              support: "" 
+            },
         contact: task.contact && task.contact.name && task.contact.phone
           ? task.contact
           : { name: "N/A", phone: "N/A" },
@@ -311,22 +326,38 @@ export default function UnpostTasksPage() {
   }, [user]);
 
   const handleOpenEditModal = (task: ITask) => {
-    setSelectedTask({
+    const safeTask = {
       ...task,
-      company: task.company || { id: "", name: "", city: "", address: "", companyRepresentative: "", support: "" },
+      company: task.company ? {
+        id: task.company.id?.toString() || "",
+        name: task.company.name || "",
+        city: task.company.city || "",
+        address: task.company.address || "",
+        companyRepresentative: task.company.companyRepresentative || "",
+        support: task.company.support || ""
+      } : { 
+        id: "", 
+        name: "", 
+        city: "", 
+        address: "", 
+        companyRepresentative: "", 
+        support: "" 
+      },
       contact: task.contact || { name: "", phone: "" },
       TasksAttachment: normalizeAttachments(task.TasksAttachment),
       assignmentAttachment: normalizeAttachments(task.assignmentAttachment),
       completionAttachment: normalizeAttachments(task.completionAttachment),
       developer_attachment: normalizeAttachments(task.developer_attachment),
       developer_status: task.developer_status || "pending",
-    });
+    };
+
+    setSelectedTask(safeTask);
     
     // Set existing attachments
-    setExistingTaskAttachments(normalizeAttachments(task.TasksAttachment));
-    setExistingAssignmentAttachments(normalizeAttachments(task.assignmentAttachment));
-    setExistingCompletionAttachments(normalizeAttachments(task.completionAttachment));
-    setExistingDeveloperAttachments(normalizeAttachments(task.developer_attachment));
+    setExistingTaskAttachments(safeTask.TasksAttachment);
+    setExistingAssignmentAttachments(safeTask.assignmentAttachment);
+    setExistingCompletionAttachments(safeTask.completionAttachment);
+    setExistingDeveloperAttachments(safeTask.developer_attachment);
     
     // Reset new files
     setNewDeveloperFiles([]);
@@ -363,7 +394,7 @@ export default function UnpostTasksPage() {
     }
 
     setIsSubmitting(true);
-    const formData = new FormData(e.currentTarget);
+    const formData = new FormData();
 
     // Ensure all required fields are included
     formData.append("code", selectedTask.code || "");
@@ -378,43 +409,21 @@ export default function UnpostTasksPage() {
       name: selectedTask.contact?.name || "",
       phone: selectedTask.contact?.phone || "",
     }));
-    formData.append("working", formData.get("working") as string || selectedTask.working || "");
-    formData.append("dateTime", formData.get("dateTime") as string || selectedTask.dateTime || "");
+    formData.append("working", (e.currentTarget.querySelector('[name="working"]') as HTMLTextAreaElement)?.value || selectedTask.working || "");
+    formData.append("dateTime", (e.currentTarget.querySelector('[name="dateTime"]') as HTMLInputElement)?.value || selectedTask.dateTime || "");
     formData.append("priority", selectedTask.priority || "Normal");
-    formData.append("status", selectedTask.status || "completed");
+    formData.append("status", "unposted");
     formData.append("UnpostStatus", "unposted");
     formData.append("assigned", selectedTask.assigned ? "true" : "false");
-
-    // Handle assignedTo
-    const assignedToId = formData.get("assignedTo") as string;
-    formData.delete("assignedTo"); // Remove the original field
-
-    if (assignedToId && assignedToId.trim() !== "") {
-      const assignedDeveloper = developers.find(dev => dev._id === assignedToId);
-      if (assignedDeveloper) {
-        const assignedToData = {
-          id: assignedDeveloper._id,
-          username: assignedDeveloper.username,
-          name: assignedDeveloper.name,
-          role: { name: assignedDeveloper.role.name },
-        };
-        formData.append("assignedTo", JSON.stringify(assignedToData));
-      } else {
-        console.warn("No developer found for assignedToId:", assignedToId);
-        formData.append("assignedTo", "");
-      }
-    } else {
-      formData.append("assignedTo", "");
-    }
-
+    formData.append("assignedTo", selectedTask.assignedTo?.id || "");
     formData.append("approved", selectedTask.approved ? "true" : "false");
     formData.append("completionApproved", selectedTask.completionApproved ? "true" : "false");
     formData.append("unposted", "true");
-    formData.append("TaskRemarks", formData.get("TaskRemarks") as string || selectedTask.TaskRemarks || "");
-    formData.append("assignmentRemarks", formData.get("assignmentRemarks") as string || selectedTask.assignmentRemarks || "");
-    formData.append("completionRemarks", formData.get("completionRemarks") as string || selectedTask.completionRemarks || "");
-    formData.append("developerRemarks", formData.get("developerRemarks") as string || selectedTask.developer_remarks || "");
-    formData.append("developerStatus", formData.get("developerStatus") as string || selectedTask.developer_status || "");
+    formData.append("TaskRemarks", (e.currentTarget.querySelector('[name="TaskRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.TaskRemarks || "");
+    formData.append("assignmentRemarks", (e.currentTarget.querySelector('[name="assignmentRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.assignmentRemarks || "");
+    formData.append("completionRemarks", (e.currentTarget.querySelector('[name="completionRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.completionRemarks || "");
+    formData.append("developerRemarks", (e.currentTarget.querySelector('[name="developerRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.developer_remarks || "");
+    formData.append("developerStatus", selectedTask.developer_status || "pending");
 
     // Append existing attachments that haven't been removed
     existingTaskAttachments.forEach((attachment, index) => {
@@ -458,18 +467,31 @@ export default function UnpostTasksPage() {
     }
 
     try {
+      console.log("Submitting form data...");
       const response = await fetch(`/api/tasks/unpost/${selectedTask._id}`, {
         method: "PUT",
         body: formData,
       });
 
-      const responseData = await response.json();
+      const responseText = await response.text();
+      console.log("Response status:", response.status);
+      console.log("Response text:", responseText);
 
       if (!response.ok) {
-        throw new Error(responseData.message || "Failed to update task");
+        let errorMessage = "Failed to update task";
+        try {
+          const errorData = JSON.parse(responseText);
+          errorMessage = errorData.message || errorData.error || errorMessage;
+        } catch (e) {
+          // If response is not JSON, use the text
+          errorMessage = responseText || errorMessage;
+        }
+        throw new Error(errorMessage);
       }
 
+      const responseData = JSON.parse(responseText);
       const updatedTask = responseData;
+      
       setTasks((prev) =>
         prev.map((task) =>
           task._id === updatedTask._id ? { ...task, ...updatedTask } : task
@@ -480,7 +502,6 @@ export default function UnpostTasksPage() {
         title: "Task Unposted Successfully",
         description: "The task has been moved back for review.",
         duration: 5000,
-        className: "bg-green-100 text-green-800 border border-green-200",
       });
     } catch (error: any) {
       console.error("Failed to update task:", error);
@@ -715,7 +736,7 @@ export default function UnpostTasksPage() {
       {/* Edit Task Modal */}
       {selectedTask && (
         <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-          <DialogContent className="w-[95vw] max-w-[800px] max-h-[80vh] overflow-y-auto bg-gray-50 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1IiBoZWlnaHQ9IjUiPgo8cmVjdCB3aWR0aD0iNSIgaGVpZ2h0PSI1IiBmaWxsPSIjZmZmIj48L3JlY3Q+CjxwYXRoIGQ9Ik0wIDVMNSAwWk02IDRMNCA2Wk0tMSAxTDEgLTFaIiBzdHJva2U9IiNlMGUwZTAiIHN0cm9rZS13aWR0aD0iMSI+PC9wYXRoPgo8L3N2Zz4=')]">
+          <DialogContent className="w-[95vw] max-w-[800px] max-h-[80vh] overflow-y-auto bg-gray-50">
             <DialogHeader>
               <DialogTitle className="text-left border-b pb-2 text-orange-700">
                 Unpost Task - {selectedTask.code}
@@ -807,12 +828,6 @@ export default function UnpostTasksPage() {
                       name="working"
                       defaultValue={selectedTask.working || ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          working: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -825,12 +840,6 @@ export default function UnpostTasksPage() {
                       type="datetime-local"
                       defaultValue={selectedTask.dateTime ? new Date(selectedTask.dateTime).toISOString().slice(0, 16) : ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          dateTime: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
@@ -856,29 +865,19 @@ export default function UnpostTasksPage() {
                     </Label>
                     <Select
                       name="assignedTo"
-                      value={selectedTask.assignedTo?.id || ""}
-                      onValueChange={(value) => {
-                        const developer = developers.find(dev => dev._id === value);
-                        setSelectedTask({
-                          ...selectedTask,
-                          assignedTo: developer
-                            ? {
-                                id: developer._id,
-                                username: developer.username,
-                                name: developer.name,
-                                role: { name: developer.role.name },
-                              }
-                            : null,
-                        });
-                      }}
+                      defaultValue={selectedTask.assignedTo?.id || ""}
                     >
                       <SelectTrigger className="col-span-3">
                         <SelectValue placeholder="Select a developer" />
                       </SelectTrigger>
                       <SelectContent>
+                        <SelectItem value="">Unassigned</SelectItem>
                         {developers.map((developer) => (
                           <SelectItem key={developer._id} value={developer._id}>
-                            {developer.name} ({developer.username})
+                            <div className="flex items-center gap-2">
+                              <User className="h-4 w-4" />
+                              <span>{developer.name} ({developer.username})</span>
+                            </div>
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -894,12 +893,6 @@ export default function UnpostTasksPage() {
                       type="datetime-local"
                       defaultValue={selectedTask.assignedDate ? new Date(selectedTask.assignedDate).toISOString().slice(0, 16) : ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          assignedDate: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                 </div>
@@ -928,12 +921,6 @@ export default function UnpostTasksPage() {
                       name="developerRemarks"
                       defaultValue={selectedTask.developer_remarks || ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          developer_remarks: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
@@ -1059,12 +1046,6 @@ export default function UnpostTasksPage() {
                       type="datetime-local"
                       defaultValue={selectedTask.approvedAt ? new Date(selectedTask.approvedAt).toISOString().slice(0, 16) : ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          approvedAt: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                 </div>
@@ -1081,12 +1062,6 @@ export default function UnpostTasksPage() {
                       name="TaskRemarks"
                       defaultValue={selectedTask.TaskRemarks || ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          TaskRemarks: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -1098,12 +1073,6 @@ export default function UnpostTasksPage() {
                       name="assignmentRemarks"
                       defaultValue={selectedTask.assignmentRemarks || ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          assignmentRemarks: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
@@ -1115,12 +1084,6 @@ export default function UnpostTasksPage() {
                       name="completionRemarks"
                       defaultValue={selectedTask.completionRemarks || ""}
                       className="col-span-3"
-                      onChange={(e) => {
-                        setSelectedTask({
-                          ...selectedTask,
-                          completionRemarks: e.target.value,
-                        });
-                      }}
                     />
                   </div>
                 </div>
