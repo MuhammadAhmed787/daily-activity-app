@@ -55,7 +55,7 @@ export interface ITask {
   createdAt: string;
   createdBy: string;
   assigned?: boolean;
-  assignedTo?: IAssignedTo;
+  assignedTo?: IAssignedTo| null;
   assignedDate?: string;
   TaskRemarks?: string;
   TasksAttachment?: string[]; // Changed to array for multiple attachments

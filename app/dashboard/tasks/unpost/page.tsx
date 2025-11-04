@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Building, Archive, Edit, Loader2, FileText, X, Trash2 } from "lucide-react";
+import { Building, Archive, Edit, Loader2, FileText, X, Trash2, Download } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
@@ -24,6 +24,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import JSZip from "jszip";
+import { saveAs } from "file-saver";
+import type { ITask } from "@/models/Task";
 
 interface UserSession {
   id: string;
@@ -40,67 +43,29 @@ interface Developer {
   };
 }
 
-interface Task {
-  _id: string;
-  code: string;
-  company: {
-    id: {
-      _id: string;
-      companyName: string;
-      city: string;
-      address: string;
-    };
-    name: string;
-    city: string;
-    address: string;
-  } | null;
-  contact: {
-    name: string;
-    phone: string;
-  } | null;
-  assignedTo: {
-    id: string;
-    username: string;
-    name: string;
-    role: { name: string };
-  } | null;
-  working: string;
-  dateTime: string;
-  status: string;
-  createdAt: string;
-  createdBy: string;
-  assigned: boolean;
-  TaskRemarks: string;
-  TasksAttachment: string[];
-  assignmentRemarks: string;
-  assignmentAttachment: string[];
-  approved: boolean;
-  completionApproved: boolean;
-  unposted: boolean;
-  completionRemarks: string;
-  completionAttachment: string[];
-  approvedAt?: string;
-  assignedDate?: string;
-  UnpostStatus?: string;
-  developer_remarks: string;
-  developer_attachment: string[];
-  developer_status: string;
-}
+// Helper function to safely normalize attachments
+const normalizeAttachments = (attachments: any): string[] => {
+  if (!attachments) return [];
+  if (Array.isArray(attachments)) {
+    return attachments.filter((att): att is string => typeof att === 'string' && att.length > 0);
+  }
+  return typeof attachments === 'string' && attachments.length > 0 ? [attachments] : [];
+};
 
 export default function UnpostTasksPage() {
-  const [tasks, setTasks] = useState<Task[]>([]);
+  const [tasks, setTasks] = useState<ITask[]>([]);
   const [developers, setDevelopers] = useState<Developer[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
+  const [selectedTask, setSelectedTask] = useState<ITask | null>(null);
   const { toast } = useToast();
   const router = useRouter();
   const [user, setUser] = useState<UserSession | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [tasksPerPage, setTasksPerPage] = useState(10);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [taskToDelete, setTaskToDelete] = useState<Task | null>(null);
+  const [taskToDelete, setTaskToDelete] = useState<ITask | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [newDeveloperFiles, setNewDeveloperFiles] = useState<File[]>([]);
   const [newTaskFiles, setNewTaskFiles] = useState<File[]>([]);
@@ -110,6 +75,133 @@ export default function UnpostTasksPage() {
   const [existingAssignmentAttachments, setExistingAssignmentAttachments] = useState<string[]>([]);
   const [existingCompletionAttachments, setExistingCompletionAttachments] = useState<string[]>([]);
   const [existingDeveloperAttachments, setExistingDeveloperAttachments] = useState<string[]>([]);
+
+  // Helper function to get download URL for any attachment
+  const getDownloadUrl = (attachment: string): string => {
+    if (attachment.startsWith('/')) {
+      return `${window.location.origin}${attachment}`;
+    } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+      return `/api/files/download?fileId=${attachment}`;
+    }
+    return attachment;
+  };
+
+  // Helper function to handle individual file click
+  const handleFileClick = (e: React.MouseEvent, attachment: string) => {
+    if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+      e.preventDefault();
+      const downloadUrl = getDownloadUrl(attachment);
+      window.open(downloadUrl, '_blank');
+    }
+  };
+
+  // Fast parallel download function
+  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+    if (!attachments || attachments.length === 0) {
+      toast({
+        title: "No Files",
+        description: "No attachments available to download",
+        variant: "default",
+      });
+      return;
+    }
+
+    const toastId = toast({
+      title: "Preparing Download",
+      description: "Starting download...",
+      duration: 2000,
+    });
+
+    try {
+      const zip = new JSZip();
+      const failedDownloads: string[] = [];
+
+      for (let i = 0; i < attachments.length; i++) {
+        const attachment = attachments[i];
+        
+        try {
+          let fileUrl: string;
+          let fileName: string;
+
+          if (attachment.startsWith('/')) {
+            fileUrl = `${window.location.origin}${attachment}`;
+            fileName = `file-${i + 1}${getFileExtensionFromPath(attachment)}`;
+          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+            fileUrl = `/api/files/download?fileId=${attachment}`;
+            fileName = `file-${i + 1}`;
+          } else if (attachment.startsWith('http')) {
+            fileUrl = attachment;
+            fileName = `file-${i + 1}`;
+          } else {
+            fileUrl = `/api/files/download?fileId=${attachment}`;
+            fileName = `file-${i + 1}`;
+          }
+
+          const response = await fetch(fileUrl);
+          
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+
+          const blob = await response.blob();
+          
+          if (blob.size === 0) {
+            throw new Error('Empty file received');
+          }
+
+          const contentDisposition = response.headers.get('content-disposition');
+          if (contentDisposition) {
+            const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+            if (filenameMatch && filenameMatch[1]) {
+              fileName = filenameMatch[1];
+            }
+          }
+
+          zip.file(fileName, blob);
+          
+        } catch (error) {
+          console.error(`Failed to download file ${i + 1}:`, error);
+          failedDownloads.push(`File ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
+          zip.file(`error-file-${i + 1}.txt`, `Failed to download: ${attachment}\nError: ${error}`);
+        }
+      }
+
+      const content = await zip.generateAsync({ 
+        type: "blob",
+        compression: "STORE"
+      });
+      
+      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
+
+      if (failedDownloads.length > 0) {
+        toast({
+          title: "Download Complete with Errors",
+          description: `Downloaded ${attachments.length - failedDownloads.length} files, ${failedDownloads.length} failed`,
+          variant: "destructive",
+        });
+      } else {
+        toast({
+          title: "Download Complete",
+          description: `Successfully downloaded ${attachments.length} files`,
+          duration: 2000,
+        });
+      }
+
+    } catch (error) {
+      console.error("Error in download process:", error);
+      toast({
+        title: "Download Error",
+        description: "Failed to process download. Please try again.",
+        variant: "destructive",
+      });
+    }
+  };
+
+  // Helper function to get file extension from path
+  const getFileExtensionFromPath = (path: string): string => {
+    const match = path.match(/\.([a-zA-Z0-9]+)$/);
+    return match ? `.${match[1]}` : '';
+  };
 
   useEffect(() => {
     const userData = localStorage.getItem("user");
@@ -175,12 +267,12 @@ export default function UnpostTasksPage() {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      const data = await response.json();
-      const normalizedTasks = data.map((task: Task) => ({
+      const data: ITask[] = await response.json();
+      const normalizedTasks = data.map((task: ITask) => ({
         ...task,
         company: task.company && task.company.name && task.company.city && task.company.address
           ? task.company
-          : { id: { _id: "", companyName: "", city: "", address: "" }, name: "N/A", city: "N/A", address: "N/A" },
+          : { id: "", name: "N/A", city: "N/A", address: "N/A", companyRepresentative: "", support: "" },
         contact: task.contact && task.contact.name && task.contact.phone
           ? task.contact
           : { name: "N/A", phone: "N/A" },
@@ -192,10 +284,10 @@ export default function UnpostTasksPage() {
                     task.assignedTo.role.name
           ? task.assignedTo
           : null,
-        TasksAttachment: Array.isArray(task.TasksAttachment) ? task.TasksAttachment : [task.TasksAttachment].filter(Boolean),
-        assignmentAttachment: Array.isArray(task.assignmentAttachment) ? task.assignmentAttachment : [task.assignmentAttachment].filter(Boolean),
-        completionAttachment: Array.isArray(task.completionAttachment) ? task.completionAttachment : [task.completionAttachment].filter(Boolean),
-        developer_attachment: Array.isArray(task.developer_attachment) ? task.developer_attachment : [task.developer_attachment].filter(Boolean),
+        TasksAttachment: normalizeAttachments(task.TasksAttachment),
+        assignmentAttachment: normalizeAttachments(task.assignmentAttachment),
+        completionAttachment: normalizeAttachments(task.completionAttachment),
+        developer_attachment: normalizeAttachments(task.developer_attachment),
         developer_status: task.developer_status || "pending",
       }));
       setTasks(normalizedTasks);
@@ -218,23 +310,23 @@ export default function UnpostTasksPage() {
     }
   }, [user]);
 
-  const handleOpenEditModal = (task: Task) => {
+  const handleOpenEditModal = (task: ITask) => {
     setSelectedTask({
       ...task,
-      company: task.company || { id: { _id: "", companyName: "", city: "", address: "" }, name: "", city: "", address: "" },
+      company: task.company || { id: "", name: "", city: "", address: "", companyRepresentative: "", support: "" },
       contact: task.contact || { name: "", phone: "" },
-      TasksAttachment: Array.isArray(task.TasksAttachment) ? task.TasksAttachment : [task.TasksAttachment].filter(Boolean),
-      assignmentAttachment: Array.isArray(task.assignmentAttachment) ? task.assignmentAttachment : [task.assignmentAttachment].filter(Boolean),
-      completionAttachment: Array.isArray(task.completionAttachment) ? task.completionAttachment : [task.completionAttachment].filter(Boolean),
-      developer_attachment: Array.isArray(task.developer_attachment) ? task.developer_attachment : [task.developer_attachment].filter(Boolean),
+      TasksAttachment: normalizeAttachments(task.TasksAttachment),
+      assignmentAttachment: normalizeAttachments(task.assignmentAttachment),
+      completionAttachment: normalizeAttachments(task.completionAttachment),
+      developer_attachment: normalizeAttachments(task.developer_attachment),
       developer_status: task.developer_status || "pending",
     });
     
     // Set existing attachments
-    setExistingTaskAttachments(Array.isArray(task.TasksAttachment) ? task.TasksAttachment : [task.TasksAttachment].filter(Boolean));
-    setExistingAssignmentAttachments(Array.isArray(task.assignmentAttachment) ? task.assignmentAttachment : [task.assignmentAttachment].filter(Boolean));
-    setExistingCompletionAttachments(Array.isArray(task.completionAttachment) ? task.completionAttachment : [task.completionAttachment].filter(Boolean));
-    setExistingDeveloperAttachments(Array.isArray(task.developer_attachment) ? task.developer_attachment : [task.developer_attachment].filter(Boolean));
+    setExistingTaskAttachments(normalizeAttachments(task.TasksAttachment));
+    setExistingAssignmentAttachments(normalizeAttachments(task.assignmentAttachment));
+    setExistingCompletionAttachments(normalizeAttachments(task.completionAttachment));
+    setExistingDeveloperAttachments(normalizeAttachments(task.developer_attachment));
     
     // Reset new files
     setNewDeveloperFiles([]);
@@ -279,6 +371,8 @@ export default function UnpostTasksPage() {
       name: selectedTask.company?.name || "",
       city: selectedTask.company?.city || "",
       address: selectedTask.company?.address || "",
+      companyRepresentative: selectedTask.company?.companyRepresentative || "",
+      support: selectedTask.company?.support || "",
     }));
     formData.append("contact", JSON.stringify({
       name: selectedTask.contact?.name || "",
@@ -286,6 +380,7 @@ export default function UnpostTasksPage() {
     }));
     formData.append("working", formData.get("working") as string || selectedTask.working || "");
     formData.append("dateTime", formData.get("dateTime") as string || selectedTask.dateTime || "");
+    formData.append("priority", selectedTask.priority || "Normal");
     formData.append("status", selectedTask.status || "completed");
     formData.append("UnpostStatus", "unposted");
     formData.append("assigned", selectedTask.assigned ? "true" : "false");
@@ -628,6 +723,7 @@ export default function UnpostTasksPage() {
             </DialogHeader>
             <form onSubmit={handleModalSubmit}>
               <div className="grid gap-4 py-4">
+                {/* Company Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
                     <Building className="h-4 w-4" /> Company Details
@@ -670,6 +766,7 @@ export default function UnpostTasksPage() {
                   </div>
                 </div>
 
+                {/* Contact Information */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Contact Information</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -698,6 +795,7 @@ export default function UnpostTasksPage() {
                   </div>
                 </div>
 
+                {/* Task Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Task Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -736,19 +834,20 @@ export default function UnpostTasksPage() {
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
-                    <Label htmlFor="status" className="text-left text-gray-600">
-                      Status
+                    <Label htmlFor="priority" className="text-left text-gray-600">
+                      Priority
                     </Label>
                     <Input
-                      id="status"
-                      name="status"
-                      value={selectedTask.status || "completed"}
+                      id="priority"
+                      name="priority"
+                      value={selectedTask.priority || "Normal"}
                       className="col-span-3"
                       disabled
                     />
                   </div>
                 </div>
 
+                {/* Assignment Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Assignment Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -805,6 +904,7 @@ export default function UnpostTasksPage() {
                   </div>
                 </div>
 
+                {/* Developer Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Developer Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -845,34 +945,52 @@ export default function UnpostTasksPage() {
                         id="developerAttachment"
                         name="developerAttachment"
                         type="file"
-                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewDeveloperFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingDeveloperAttachments.length > 0 ? (
-                          <ul className="space-y-1">
-                            {existingDeveloperAttachments.map((attachment, index) => (
-                              <li key={index} className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <FileText className="h-3 w-3 mr-1" />
-                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
-                                    Attachment {index + 1}
-                                  </a>
-                                </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => removeExistingAttachment(index, setExistingDeveloperAttachments, "developer")}
-                                  className="h-4 w-4 p-0"
-                                >
-                                  <X className="h-3 w-3" />
-                                </Button>
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="space-y-2">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              size="sm" 
+                              className="text-xs"
+                              onClick={() => downloadAllAttachments(selectedTask._id, existingDeveloperAttachments, 'developer')}
+                            >
+                              <Download className="h-3 w-3 mr-1" />
+                              Download All ({existingDeveloperAttachments.length})
+                            </Button>
+                            <ul className="space-y-1">
+                              {existingDeveloperAttachments.map((attachment, index) => (
+                                <li key={index} className="flex items-center justify-between">
+                                  <div className="flex items-center">
+                                    <FileText className="h-3 w-3 mr-1" />
+                                    <a 
+                                      href={getDownloadUrl(attachment)} 
+                                      target="_blank" 
+                                      rel="noopener noreferrer" 
+                                      className="text-blue-600 hover:underline text-xs"
+                                      onClick={(e) => handleFileClick(e, attachment)}
+                                    >
+                                      Attachment {index + 1}
+                                    </a>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => removeExistingAttachment(index, setExistingDeveloperAttachments, "developer")}
+                                    className="h-4 w-4 p-0"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
@@ -904,6 +1022,7 @@ export default function UnpostTasksPage() {
                   </div>
                 </div>
 
+                {/* Approval Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Approval Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -950,6 +1069,7 @@ export default function UnpostTasksPage() {
                   </div>
                 </div>
 
+                {/* Remarks */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Remarks</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -1005,8 +1125,11 @@ export default function UnpostTasksPage() {
                   </div>
                 </div>
 
+                {/* Attachments */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Attachments</h3>
+                  
+                  {/* Task Attachments */}
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
                     <Label htmlFor="TasksAttachment" className="text-left text-gray-600">
                       Task Attachments
@@ -1016,34 +1139,52 @@ export default function UnpostTasksPage() {
                         id="TasksAttachment"
                         name="TasksAttachment"
                         type="file"
-                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewTaskFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingTaskAttachments.length > 0 ? (
-                          <ul className="space-y-1">
-                            {existingTaskAttachments.map((attachment, index) => (
-                              <li key={index} className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <FileText className="h-3 w-3 mr-1" />
-                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
-                                    Attachment {index + 1}
-                                  </a>
-                                </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => removeExistingAttachment(index, setExistingTaskAttachments, "task")}
-                                  className="h-4 w-4 p-0"
-                                >
-                                  <X className="h-3 w-3" />
-                                </Button>
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="space-y-2">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              size="sm" 
+                              className="text-xs"
+                              onClick={() => downloadAllAttachments(selectedTask._id, existingTaskAttachments, 'task')}
+                            >
+                              <Download className="h-3 w-3 mr-1" />
+                              Download All ({existingTaskAttachments.length})
+                            </Button>
+                            <ul className="space-y-1">
+                              {existingTaskAttachments.map((attachment, index) => (
+                                <li key={index} className="flex items-center justify-between">
+                                  <div className="flex items-center">
+                                    <FileText className="h-3 w-3 mr-1" />
+                                    <a 
+                                      href={getDownloadUrl(attachment)} 
+                                      target="_blank" 
+                                      rel="noopener noreferrer" 
+                                      className="text-blue-600 hover:underline text-xs"
+                                      onClick={(e) => handleFileClick(e, attachment)}
+                                    >
+                                      Attachment {index + 1}
+                                    </a>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => removeExistingAttachment(index, setExistingTaskAttachments, "task")}
+                                    className="h-4 w-4 p-0"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
@@ -1073,6 +1214,8 @@ export default function UnpostTasksPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Assignment Attachments */}
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
                     <Label htmlFor="assignmentAttachment" className="text-left text-gray-600">
                       Assignment Attachments
@@ -1082,34 +1225,52 @@ export default function UnpostTasksPage() {
                         id="assignmentAttachment"
                         name="assignmentAttachment"
                         type="file"
-                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewAssignmentFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingAssignmentAttachments.length > 0 ? (
-                          <ul className="space-y-1">
-                            {existingAssignmentAttachments.map((attachment, index) => (
-                              <li key={index} className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <FileText className="h-3 w-3 mr-1" />
-                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
-                                    Attachment {index + 1}
-                                  </a>
-                                </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => removeExistingAttachment(index, setExistingAssignmentAttachments, "assignment")}
-                                  className="h-4 w-4 p-0"
-                                >
-                                  <X className="h-3 w-3" />
-                                </Button>
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="space-y-2">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              size="sm" 
+                              className="text-xs"
+                              onClick={() => downloadAllAttachments(selectedTask._id, existingAssignmentAttachments, 'assignment')}
+                            >
+                              <Download className="h-3 w-3 mr-1" />
+                              Download All ({existingAssignmentAttachments.length})
+                            </Button>
+                            <ul className="space-y-1">
+                              {existingAssignmentAttachments.map((attachment, index) => (
+                                <li key={index} className="flex items-center justify-between">
+                                  <div className="flex items-center">
+                                    <FileText className="h-3 w-3 mr-1" />
+                                    <a 
+                                      href={getDownloadUrl(attachment)} 
+                                      target="_blank" 
+                                      rel="noopener noreferrer" 
+                                      className="text-blue-600 hover:underline text-xs"
+                                      onClick={(e) => handleFileClick(e, attachment)}
+                                    >
+                                      Attachment {index + 1}
+                                    </a>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => removeExistingAttachment(index, setExistingAssignmentAttachments, "assignment")}
+                                    className="h-4 w-4 p-0"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
@@ -1139,6 +1300,8 @@ export default function UnpostTasksPage() {
                       </div>
                     </div>
                   </div>
+
+                  {/* Completion Attachments */}
                   <div className="grid grid-cols-4 items-start gap-4">
                     <Label htmlFor="completionAttachment" className="text-left text-gray-600">
                       Completion Attachments
@@ -1148,34 +1311,52 @@ export default function UnpostTasksPage() {
                         id="completionAttachment"
                         name="completionAttachment"
                         type="file"
-                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewCompletionFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingCompletionAttachments.length > 0 ? (
-                          <ul className="space-y-1">
-                            {existingCompletionAttachments.map((attachment, index) => (
-                              <li key={index} className="flex items-center justify-between">
-                                <div className="flex items-center">
-                                  <FileText className="h-3 w-3 mr-1" />
-                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
-                                    Attachment {index + 1}
-                                  </a>
-                                </div>
-                                <Button
-                                  type="button"
-                                  variant="ghost"
-                                  size="sm"
-                                  onClick={() => removeExistingAttachment(index, setExistingCompletionAttachments, "completion")}
-                                  className="h-4 w-4 p-0"
-                                >
-                                  <X className="h-3 w-3" />
-                                </Button>
-                              </li>
-                            ))}
-                          </ul>
+                          <div className="space-y-2">
+                            <Button 
+                              type="button" 
+                              variant="outline" 
+                              size="sm" 
+                              className="text-xs"
+                              onClick={() => downloadAllAttachments(selectedTask._id, existingCompletionAttachments, 'completion')}
+                            >
+                              <Download className="h-3 w-3 mr-1" />
+                              Download All ({existingCompletionAttachments.length})
+                            </Button>
+                            <ul className="space-y-1">
+                              {existingCompletionAttachments.map((attachment, index) => (
+                                <li key={index} className="flex items-center justify-between">
+                                  <div className="flex items-center">
+                                    <FileText className="h-3 w-3 mr-1" />
+                                    <a 
+                                      href={getDownloadUrl(attachment)} 
+                                      target="_blank" 
+                                      rel="noopener noreferrer" 
+                                      className="text-blue-600 hover:underline text-xs"
+                                      onClick={(e) => handleFileClick(e, attachment)}
+                                    >
+                                      Attachment {index + 1}
+                                    </a>
+                                  </div>
+                                  <Button
+                                    type="button"
+                                    variant="ghost"
+                                    size="sm"
+                                    onClick={() => removeExistingAttachment(index, setExistingCompletionAttachments, "completion")}
+                                    className="h-4 w-4 p-0"
+                                  >
+                                    <X className="h-3 w-3" />
+                                  </Button>
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
