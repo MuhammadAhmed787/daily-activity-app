@@ -238,30 +238,42 @@ export default function UnpostTasksPage() {
     }
   }, [router, toast]);
 
-  const fetchDevelopers = async () => {
-    try {
-      const response = await fetch("/api/users");
-      if (!response.ok) {
-        throw new Error(`HTTP error! status: ${response.status}`);
-      }
-      const data = await response.json();
-      console.log("Developers API response:", data); // Debug log
-      
-      // Filter users with developer role and ensure they have required fields
-      const developerUsers = data.filter((user: any) =>
-        user.role && user.role.name === "developer" && user._id && user.username && user.name
-      );
-      console.log("Filtered developers:", developerUsers); // Debug log
-      setDevelopers(developerUsers);
-    } catch (error) {
-      console.error("Failed to fetch developers:", error);
-      toast({
-        title: "Error fetching developers",
-        description: "Could not load developers. Please try again.",
-        variant: "destructive",
-      });
+const fetchDevelopers = async () => {
+  try {
+    const response = await fetch("/api/users");
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
     }
-  };
+    const data = await response.json();
+    console.log("All users from API:", data); // Debug log
+    
+    // Filter users with developer role OR include administrators if needed
+    const developerUsers = data.filter((user: any) => {
+      // Check if user has role and it's either "developer" or you want to include administrators
+      const isDeveloper = user.role && user.role.name === "developer";
+      const isAdmin = user.role && user.role.name === "Administrator";
+      
+      // Include both developers and administrators, or just developers
+      return isDeveloper || isAdmin; // Change this based on your needs
+    });
+    
+    console.log("Filtered developers:", developerUsers); // Debug log
+    
+    // Ensure all required fields exist
+    const validDevelopers = developerUsers.filter((dev: any) => 
+      dev._id && dev.username && dev.name && dev.role
+    );
+    
+    setDevelopers(validDevelopers);
+  } catch (error) {
+    console.error("Failed to fetch developers:", error);
+    toast({
+      title: "Error fetching developers",
+      description: "Could not load developers. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
 
   const fetchTasks = async () => {
     setIsLoading(true);
