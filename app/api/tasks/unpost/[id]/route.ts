@@ -6,6 +6,7 @@ import path from "path";
 import { v4 as uuidv4 } from "uuid";
 import mongoose from "mongoose";
 
+// Define the context type for dynamic route parameters
 interface RouteContext {
   params: Promise<{ id: string }>;
 }
@@ -49,20 +50,20 @@ export async function PUT(req: Request, context: RouteContext) {
 
     // Normalize array for attachments
     const normalizeArray = (value: unknown): string[] => {
-      if (Array.isArray(value)) return value.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+      if (Array.isArray(value)) return value.map(String);
       if (typeof value === "string" && value.trim() !== "") {
         try {
           const parsed = JSON.parse(value);
-          if (Array.isArray(parsed)) return parsed.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
-          return [value].filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+          if (Array.isArray(parsed)) return parsed.map(String);
+          return [value];
         } catch {
-          return [value].filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+          return [value];
         }
       }
       return [];
     };
 
-    // Handle multiple file attachments
+    // Handle multiple file attachments with enhanced file type support
     const handleMultipleAttachments = async (
       newFiles: File[],
       existingFilePaths: unknown,
@@ -149,7 +150,7 @@ export async function PUT(req: Request, context: RouteContext) {
           attachments.push(value);
         }
       }
-      return attachments.filter((item): item is string => typeof item === 'string' && item.trim() !== '');
+      return attachments;
     };
 
     const existingTasksAttachments = getExistingAttachments(formData, 'existingTasksAttachment');
@@ -208,12 +209,9 @@ export async function PUT(req: Request, context: RouteContext) {
       
       for (const attachment of attachmentsToDelete) {
         try {
-          // Only delete local files, not GridFS files
-          if (attachment.startsWith('/uploads/')) {
-            const fullPath = path.join(process.cwd(), "public", attachment);
-            await unlink(fullPath);
-            console.log(`Deleted attachment: ${attachment}`);
-          }
+          const fullPath = path.join(process.cwd(), "public", attachment);
+          await unlink(fullPath);
+          console.log(`Deleted attachment: ${attachment}`);
         } catch (error) {
           console.error(`Error deleting attachment ${attachment}:`, error);
         }
@@ -245,6 +243,12 @@ export async function PUT(req: Request, context: RouteContext) {
     if (!code && !existingTask.code) {
       return NextResponse.json({ message: "Code is required" }, { status: 400 });
     }
+    if (!company && !existingTask.company) {
+      return NextResponse.json({ message: "Company is required" }, { status: 400 });
+    }
+    if (!contact && !existingTask.contact) {
+      return NextResponse.json({ message: "Contact is required" }, { status: 400 });
+    }
     if (!working && !existingTask.working) {
       return NextResponse.json({ message: "Working is required" }, { status: 400 });
     }
@@ -262,12 +266,12 @@ export async function PUT(req: Request, context: RouteContext) {
           name: parsed.name || existingTask.company.name,
           city: parsed.city || existingTask.company.city,
           address: parsed.address || existingTask.company.address,
-          companyRepresentative: parsed.companyRepresentative || existingTask.company.companyRepresentative || "",
-          support: parsed.support || existingTask.company.support || "",
         };
       } catch (e) {
-        console.error("Error parsing company:", e);
-        // Keep existing company data if parsing fails
+        return NextResponse.json(
+          { message: "Invalid company format: must be valid JSON" },
+          { status: 400 }
+        );
       }
     }
 
@@ -275,14 +279,18 @@ export async function PUT(req: Request, context: RouteContext) {
     let contactData = existingTask.contact;
     if (contact) {
       try {
-        const parsed = JSON.parse(contact);
-        contactData = {
-          name: parsed.name || existingTask.contact.name,
-          phone: parsed.phone || existingTask.contact.phone,
-        };
+        contactData = JSON.parse(contact);
+        if (!contactData.name || !contactData.phone) {
+          return NextResponse.json(
+            { message: "Contact must include name and phone" },
+            { status: 400 }
+          );
+        }
       } catch (e) {
-        console.error("Error parsing contact:", e);
-        // Keep existing contact data if parsing fails
+        return NextResponse.json(
+          { message: "Invalid contact format: must be valid JSON" },
+          { status: 400 }
+        );
       }
     }
 
@@ -293,45 +301,64 @@ export async function PUT(req: Request, context: RouteContext) {
         if (typeof assignedTo === "string") {
           if (assignedTo.trim() && (assignedTo.startsWith("{") || assignedTo.startsWith("["))) {
             assignedToData = JSON.parse(assignedTo);
+            if (
+              !assignedToData.id ||
+              !assignedToData.username ||
+              !assignedToData.name ||
+              !assignedToData.role?.name
+            ) {
+              return NextResponse.json(
+                { message: "Invalid assignedTo format: must include id, username, name, and role.name" },
+                { status: 400 }
+              );
+            }
           } else {
-            // If it's just an ID, find the developer
-            const db = mongoose.connection.db;
-if (!db) {
-  // This means dbConnect() didn't produce a usable db — handle gracefully
-  console.warn("mongoose.connection.db is not available when resolving assignedTo. Skipping assignedTo lookup.");
-  assignedToData = undefined;
-} else {
-  const developer = await db.collection("users").findOne({ _id: new mongoose.Types.ObjectId(assignedTo) });
-  if (developer) {
-    assignedToData = {
-      id: developer._id.toString(),
-      username: developer.username,
-      name: developer.name,
-      role: { name: developer.role?.name || "developer" },
-    };
-  } else {
-    assignedToData = undefined;
-  }
-}
+            return NextResponse.json(
+              { message: "Invalid assignedTo format: must be valid JSON" },
+              { status: 400 }
+            );
           }
+        } else {
+          assignedToData = assignedTo;
         }
       } catch (e) {
         console.error("Error parsing assignedTo:", e, "Input:", assignedTo);
-        // Keep existing assignedTo data if parsing fails
+        return NextResponse.json(
+          { message: "Failed to parse assignedTo: invalid JSON format" },
+          { status: 400 }
+        );
       }
     } else {
-      assignedToData = undefined;
+      assignedToData = null; // Allow null if assignedTo is not provided
+    }
+
+    // Validate status and developer_status
+    const validStatuses = ["pending", "assigned", "approved", "completed", "on-hold", "unposted"];
+    if (status && !validStatuses.includes(status)) {
+      return NextResponse.json(
+        { message: `Invalid status: must be one of ${validStatuses.join(", ")}` },
+        { status: 400 }
+      );
+    }
+
+    const validDeveloperStatuses = ["pending", "done", "not-done", "on-hold"];
+    if (developer_status && !validDeveloperStatuses.includes(developer_status)) {
+      return NextResponse.json(
+        { message: `Invalid developer_status: must be one of ${validDeveloperStatuses.join(", ")}` },
+        { status: 400 }
+      );
     }
 
     // Prepare update object
-    const updateData: any = {
+    const updateData: Partial<ITask> = {
       code: code || existingTask.code,
       company: companyData,
       contact: contactData,
       working: working || existingTask.working,
-      dateTime: dateTime ? new Date(dateTime) : existingTask.dateTime,
+      dateTime: dateTime || existingTask.dateTime,
       status: status || existingTask.status,
       assigned: assigned === "true",
+      assignedTo: assignedToData ?? existingTask.assignedTo,
       approved: approved === "true",
       completionApproved: completionApproved === "true",
       unposted: unposted === "true",
@@ -343,29 +370,26 @@ if (!db) {
       completionRemarks: completionRemarks || existingTask.completionRemarks || "",
       completionAttachment: completionAttachmentResult.filePaths,
       developer_remarks: developer_remarks || existingTask.developer_remarks || "",
-      developer_status: developer_status || existingTask.developer_status || "pending",
+      developer_status: developer_status || existingTask.developer_status || "",
       developer_attachment: developerAttachmentResult.filePaths,
-      updatedAt: new Date(),
+      approvedAt: approvedAt || existingTask.approvedAt,
+      assignedDate: assignedDate || existingTask.assignedDate,
+      unpostedAt: unposted === "true" ? new Date().toISOString() : existingTask.unpostedAt,
+      updatedAt: new Date().toISOString(),
     };
-
-    // Add optional fields if they exist
-    if (assignedToData) updateData.assignedTo = assignedToData;
-    if (approvedAt) updateData.approvedAt = new Date(approvedAt);
-    if (assignedDate) updateData.assignedDate = new Date(assignedDate);
-    if (unposted === "true") updateData.unpostedAt = new Date();
 
     // Update task
     const updatedTask = await Task.findByIdAndUpdate(
       taskId,
       { $set: updateData },
       { new: true, runValidators: true }
-    );
+    ).lean();
 
     if (!updatedTask) {
       return NextResponse.json({ message: "Failed to update task" }, { status: 500 });
     }
 
-    return NextResponse.json(updatedTask.toObject());
+    return NextResponse.json(updatedTask);
   } catch (error) {
     console.error("Error updating unpost task:", error);
     const errorMessage = error instanceof Error ? error.message : String(error);

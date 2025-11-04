@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { Building, Archive, Edit, Loader2, FileText, X, Trash2, Download, User } from "lucide-react";
+import { Building, Archive, Edit, Loader2, FileText, X, Trash2 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
   Dialog,
@@ -24,9 +24,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import JSZip from "jszip";
-import { saveAs } from "file-saver";
-import type { ITask } from "@/models/Task";
 
 interface UserSession {
   id: string;
@@ -43,29 +40,67 @@ interface Developer {
   };
 }
 
-// Helper function to safely normalize attachments
-const normalizeAttachments = (attachments: any): string[] => {
-  if (!attachments) return [];
-  if (Array.isArray(attachments)) {
-    return attachments.filter((att): att is string => typeof att === 'string' && att.length > 0);
-  }
-  return typeof attachments === 'string' && attachments.length > 0 ? [attachments] : [];
-};
+interface Task {
+  _id: string;
+  code: string;
+  company: {
+    id: {
+      _id: string;
+      companyName: string;
+      city: string;
+      address: string;
+    };
+    name: string;
+    city: string;
+    address: string;
+  } | null;
+  contact: {
+    name: string;
+    phone: string;
+  } | null;
+  assignedTo: {
+    id: string;
+    username: string;
+    name: string;
+    role: { name: string };
+  } | null;
+  working: string;
+  dateTime: string;
+  status: string;
+  createdAt: string;
+  createdBy: string;
+  assigned: boolean;
+  TaskRemarks: string;
+  TasksAttachment: string[];
+  assignmentRemarks: string;
+  assignmentAttachment: string[];
+  approved: boolean;
+  completionApproved: boolean;
+  unposted: boolean;
+  completionRemarks: string;
+  completionAttachment: string[];
+  approvedAt?: string;
+  assignedDate?: string;
+  UnpostStatus?: string;
+  developer_remarks: string;
+  developer_attachment: string[];
+  developer_status: string;
+}
 
 export default function UnpostTasksPage() {
-  const [tasks, setTasks] = useState<ITask[]>([]);
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [developers, setDevelopers] = useState<Developer[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
-  const [selectedTask, setSelectedTask] = useState<ITask | null>(null);
+  const [selectedTask, setSelectedTask] = useState<Task | null>(null);
   const { toast } = useToast();
   const router = useRouter();
   const [user, setUser] = useState<UserSession | null>(null);
   const [currentPage, setCurrentPage] = useState(1);
   const [tasksPerPage, setTasksPerPage] = useState(10);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
-  const [taskToDelete, setTaskToDelete] = useState<ITask | null>(null);
+  const [taskToDelete, setTaskToDelete] = useState<Task | null>(null);
   const [isDeleting, setIsDeleting] = useState(false);
   const [newDeveloperFiles, setNewDeveloperFiles] = useState<File[]>([]);
   const [newTaskFiles, setNewTaskFiles] = useState<File[]>([]);
@@ -75,133 +110,6 @@ export default function UnpostTasksPage() {
   const [existingAssignmentAttachments, setExistingAssignmentAttachments] = useState<string[]>([]);
   const [existingCompletionAttachments, setExistingCompletionAttachments] = useState<string[]>([]);
   const [existingDeveloperAttachments, setExistingDeveloperAttachments] = useState<string[]>([]);
-
-  // Helper function to get download URL for any attachment
-  const getDownloadUrl = (attachment: string): string => {
-    if (attachment.startsWith('/')) {
-      return `${window.location.origin}${attachment}`;
-    } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-      return `/api/files/download?fileId=${attachment}`;
-    }
-    return attachment;
-  };
-
-  // Helper function to handle individual file click
-  const handleFileClick = (e: React.MouseEvent, attachment: string) => {
-    if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-      e.preventDefault();
-      const downloadUrl = getDownloadUrl(attachment);
-      window.open(downloadUrl, '_blank');
-    }
-  };
-
-  // Fast parallel download function
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    if (!attachments || attachments.length === 0) {
-      toast({
-        title: "No Files",
-        description: "No attachments available to download",
-        variant: "default",
-      });
-      return;
-    }
-
-    const toastId = toast({
-      title: "Preparing Download",
-      description: "Starting download...",
-      duration: 2000,
-    });
-
-    try {
-      const zip = new JSZip();
-      const failedDownloads: string[] = [];
-
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        
-        try {
-          let fileUrl: string;
-          let fileName: string;
-
-          if (attachment.startsWith('/')) {
-            fileUrl = `${window.location.origin}${attachment}`;
-            fileName = `file-${i + 1}${getFileExtensionFromPath(attachment)}`;
-          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-            fileUrl = `/api/files/download?fileId=${attachment}`;
-            fileName = `file-${i + 1}`;
-          } else if (attachment.startsWith('http')) {
-            fileUrl = attachment;
-            fileName = `file-${i + 1}`;
-          } else {
-            fileUrl = `/api/files/download?fileId=${attachment}`;
-            fileName = `file-${i + 1}`;
-          }
-
-          const response = await fetch(fileUrl);
-          
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-
-          const blob = await response.blob();
-          
-          if (blob.size === 0) {
-            throw new Error('Empty file received');
-          }
-
-          const contentDisposition = response.headers.get('content-disposition');
-          if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-            if (filenameMatch && filenameMatch[1]) {
-              fileName = filenameMatch[1];
-            }
-          }
-
-          zip.file(fileName, blob);
-          
-        } catch (error) {
-          console.error(`Failed to download file ${i + 1}:`, error);
-          failedDownloads.push(`File ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
-          zip.file(`error-file-${i + 1}.txt`, `Failed to download: ${attachment}\nError: ${error}`);
-        }
-      }
-
-      const content = await zip.generateAsync({ 
-        type: "blob",
-        compression: "STORE"
-      });
-      
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
-
-      if (failedDownloads.length > 0) {
-        toast({
-          title: "Download Complete with Errors",
-          description: `Downloaded ${attachments.length - failedDownloads.length} files, ${failedDownloads.length} failed`,
-          variant: "destructive",
-        });
-      } else {
-        toast({
-          title: "Download Complete",
-          description: `Successfully downloaded ${attachments.length} files`,
-          duration: 2000,
-        });
-      }
-
-    } catch (error) {
-      console.error("Error in download process:", error);
-      toast({
-        title: "Download Error",
-        description: "Failed to process download. Please try again.",
-        variant: "destructive",
-      });
-    }
-  };
-
-  // Helper function to get file extension from path
-  const getFileExtensionFromPath = (path: string): string => {
-    const match = path.match(/\.([a-zA-Z0-9]+)$/);
-    return match ? `.${match[1]}` : '';
-  };
 
   useEffect(() => {
     const userData = localStorage.getItem("user");
@@ -238,42 +146,27 @@ export default function UnpostTasksPage() {
     }
   }, [router, toast]);
 
-const fetchDevelopers = async () => {
-  try {
-    const response = await fetch("/api/users");
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
+  const fetchDevelopers = async () => {
+    try {
+      const response = await fetch("/api/users");
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+      const data = await response.json();
+      // Filter users with developer role
+      const developerUsers = data.filter((user: Developer) =>
+        user.role && user.role.name === "developer"
+      );
+      setDevelopers(developerUsers);
+    } catch (error) {
+      console.error("Failed to fetch developers:", error);
+      toast({
+        title: "Error fetching developers",
+        description: "Could not load developers. Please try again.",
+        variant: "destructive",
+      });
     }
-    const data = await response.json();
-    console.log("All users from API:", data); // Debug log
-    
-    // Filter users with developer role OR include administrators if needed
-    const developerUsers = data.filter((user: any) => {
-      // Check if user has role and it's either "developer" or you want to include administrators
-      const isDeveloper = user.role && user.role.name === "developer";
-      const isAdmin = user.role && user.role.name === "Administrator";
-      
-      // Include both developers and administrators, or just developers
-      return isDeveloper || isAdmin; // Change this based on your needs
-    });
-    
-    console.log("Filtered developers:", developerUsers); // Debug log
-    
-    // Ensure all required fields exist
-    const validDevelopers = developerUsers.filter((dev: any) => 
-      dev._id && dev.username && dev.name && dev.role
-    );
-    
-    setDevelopers(validDevelopers);
-  } catch (error) {
-    console.error("Failed to fetch developers:", error);
-    toast({
-      title: "Error fetching developers",
-      description: "Could not load developers. Please try again.",
-      variant: "destructive",
-    });
-  }
-};
+  };
 
   const fetchTasks = async () => {
     setIsLoading(true);
@@ -282,24 +175,12 @@ const fetchDevelopers = async () => {
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
       }
-      const data: ITask[] = await response.json();
-      console.log("Tasks API response:", data); // Debug log
-      
-      const normalizedTasks = data.map((task: ITask) => ({
+      const data = await response.json();
+      const normalizedTasks = data.map((task: Task) => ({
         ...task,
         company: task.company && task.company.name && task.company.city && task.company.address
-          ? {
-              ...task.company,
-              id: task.company.id?.toString() || ""
-            }
-          : { 
-              id: "", 
-              name: "N/A", 
-              city: "N/A", 
-              address: "N/A", 
-              companyRepresentative: "", 
-              support: "" 
-            },
+          ? task.company
+          : { id: { _id: "", companyName: "", city: "", address: "" }, name: "N/A", city: "N/A", address: "N/A" },
         contact: task.contact && task.contact.name && task.contact.phone
           ? task.contact
           : { name: "N/A", phone: "N/A" },
@@ -311,10 +192,10 @@ const fetchDevelopers = async () => {
                     task.assignedTo.role.name
           ? task.assignedTo
           : null,
-        TasksAttachment: normalizeAttachments(task.TasksAttachment),
-        assignmentAttachment: normalizeAttachments(task.assignmentAttachment),
-        completionAttachment: normalizeAttachments(task.completionAttachment),
-        developer_attachment: normalizeAttachments(task.developer_attachment),
+        TasksAttachment: Array.isArray(task.TasksAttachment) ? task.TasksAttachment : [task.TasksAttachment].filter(Boolean),
+        assignmentAttachment: Array.isArray(task.assignmentAttachment) ? task.assignmentAttachment : [task.assignmentAttachment].filter(Boolean),
+        completionAttachment: Array.isArray(task.completionAttachment) ? task.completionAttachment : [task.completionAttachment].filter(Boolean),
+        developer_attachment: Array.isArray(task.developer_attachment) ? task.developer_attachment : [task.developer_attachment].filter(Boolean),
         developer_status: task.developer_status || "pending",
       }));
       setTasks(normalizedTasks);
@@ -337,39 +218,23 @@ const fetchDevelopers = async () => {
     }
   }, [user]);
 
-  const handleOpenEditModal = (task: ITask) => {
-    const safeTask = {
+  const handleOpenEditModal = (task: Task) => {
+    setSelectedTask({
       ...task,
-      company: task.company ? {
-        id: task.company.id?.toString() || "",
-        name: task.company.name || "",
-        city: task.company.city || "",
-        address: task.company.address || "",
-        companyRepresentative: task.company.companyRepresentative || "",
-        support: task.company.support || ""
-      } : { 
-        id: "", 
-        name: "", 
-        city: "", 
-        address: "", 
-        companyRepresentative: "", 
-        support: "" 
-      },
+      company: task.company || { id: { _id: "", companyName: "", city: "", address: "" }, name: "", city: "", address: "" },
       contact: task.contact || { name: "", phone: "" },
-      TasksAttachment: normalizeAttachments(task.TasksAttachment),
-      assignmentAttachment: normalizeAttachments(task.assignmentAttachment),
-      completionAttachment: normalizeAttachments(task.completionAttachment),
-      developer_attachment: normalizeAttachments(task.developer_attachment),
+      TasksAttachment: Array.isArray(task.TasksAttachment) ? task.TasksAttachment : [task.TasksAttachment].filter(Boolean),
+      assignmentAttachment: Array.isArray(task.assignmentAttachment) ? task.assignmentAttachment : [task.assignmentAttachment].filter(Boolean),
+      completionAttachment: Array.isArray(task.completionAttachment) ? task.completionAttachment : [task.completionAttachment].filter(Boolean),
+      developer_attachment: Array.isArray(task.developer_attachment) ? task.developer_attachment : [task.developer_attachment].filter(Boolean),
       developer_status: task.developer_status || "pending",
-    };
-
-    setSelectedTask(safeTask);
+    });
     
     // Set existing attachments
-    setExistingTaskAttachments(safeTask.TasksAttachment);
-    setExistingAssignmentAttachments(safeTask.assignmentAttachment);
-    setExistingCompletionAttachments(safeTask.completionAttachment);
-    setExistingDeveloperAttachments(safeTask.developer_attachment);
+    setExistingTaskAttachments(Array.isArray(task.TasksAttachment) ? task.TasksAttachment : [task.TasksAttachment].filter(Boolean));
+    setExistingAssignmentAttachments(Array.isArray(task.assignmentAttachment) ? task.assignmentAttachment : [task.assignmentAttachment].filter(Boolean));
+    setExistingCompletionAttachments(Array.isArray(task.completionAttachment) ? task.completionAttachment : [task.completionAttachment].filter(Boolean));
+    setExistingDeveloperAttachments(Array.isArray(task.developer_attachment) ? task.developer_attachment : [task.developer_attachment].filter(Boolean));
     
     // Reset new files
     setNewDeveloperFiles([]);
@@ -406,7 +271,7 @@ const fetchDevelopers = async () => {
     }
 
     setIsSubmitting(true);
-    const formData = new FormData();
+    const formData = new FormData(e.currentTarget);
 
     // Ensure all required fields are included
     formData.append("code", selectedTask.code || "");
@@ -414,28 +279,47 @@ const fetchDevelopers = async () => {
       name: selectedTask.company?.name || "",
       city: selectedTask.company?.city || "",
       address: selectedTask.company?.address || "",
-      companyRepresentative: selectedTask.company?.companyRepresentative || "",
-      support: selectedTask.company?.support || "",
     }));
     formData.append("contact", JSON.stringify({
       name: selectedTask.contact?.name || "",
       phone: selectedTask.contact?.phone || "",
     }));
-    formData.append("working", (e.currentTarget.querySelector('[name="working"]') as HTMLTextAreaElement)?.value || selectedTask.working || "");
-    formData.append("dateTime", (e.currentTarget.querySelector('[name="dateTime"]') as HTMLInputElement)?.value || selectedTask.dateTime || "");
-    formData.append("priority", selectedTask.priority || "Normal");
-    formData.append("status", "unposted");
+    formData.append("working", formData.get("working") as string || selectedTask.working || "");
+    formData.append("dateTime", formData.get("dateTime") as string || selectedTask.dateTime || "");
+    formData.append("status", selectedTask.status || "completed");
     formData.append("UnpostStatus", "unposted");
     formData.append("assigned", selectedTask.assigned ? "true" : "false");
-    formData.append("assignedTo", selectedTask.assignedTo?.id || "");
+
+    // Handle assignedTo
+    const assignedToId = formData.get("assignedTo") as string;
+    formData.delete("assignedTo"); // Remove the original field
+
+    if (assignedToId && assignedToId.trim() !== "") {
+      const assignedDeveloper = developers.find(dev => dev._id === assignedToId);
+      if (assignedDeveloper) {
+        const assignedToData = {
+          id: assignedDeveloper._id,
+          username: assignedDeveloper.username,
+          name: assignedDeveloper.name,
+          role: { name: assignedDeveloper.role.name },
+        };
+        formData.append("assignedTo", JSON.stringify(assignedToData));
+      } else {
+        console.warn("No developer found for assignedToId:", assignedToId);
+        formData.append("assignedTo", "");
+      }
+    } else {
+      formData.append("assignedTo", "");
+    }
+
     formData.append("approved", selectedTask.approved ? "true" : "false");
     formData.append("completionApproved", selectedTask.completionApproved ? "true" : "false");
     formData.append("unposted", "true");
-    formData.append("TaskRemarks", (e.currentTarget.querySelector('[name="TaskRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.TaskRemarks || "");
-    formData.append("assignmentRemarks", (e.currentTarget.querySelector('[name="assignmentRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.assignmentRemarks || "");
-    formData.append("completionRemarks", (e.currentTarget.querySelector('[name="completionRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.completionRemarks || "");
-    formData.append("developerRemarks", (e.currentTarget.querySelector('[name="developerRemarks"]') as HTMLTextAreaElement)?.value || selectedTask.developer_remarks || "");
-    formData.append("developerStatus", selectedTask.developer_status || "pending");
+    formData.append("TaskRemarks", formData.get("TaskRemarks") as string || selectedTask.TaskRemarks || "");
+    formData.append("assignmentRemarks", formData.get("assignmentRemarks") as string || selectedTask.assignmentRemarks || "");
+    formData.append("completionRemarks", formData.get("completionRemarks") as string || selectedTask.completionRemarks || "");
+    formData.append("developerRemarks", formData.get("developerRemarks") as string || selectedTask.developer_remarks || "");
+    formData.append("developerStatus", formData.get("developerStatus") as string || selectedTask.developer_status || "");
 
     // Append existing attachments that haven't been removed
     existingTaskAttachments.forEach((attachment, index) => {
@@ -479,31 +363,18 @@ const fetchDevelopers = async () => {
     }
 
     try {
-      console.log("Submitting form data...");
       const response = await fetch(`/api/tasks/unpost/${selectedTask._id}`, {
         method: "PUT",
         body: formData,
       });
 
-      const responseText = await response.text();
-      console.log("Response status:", response.status);
-      console.log("Response text:", responseText);
+      const responseData = await response.json();
 
       if (!response.ok) {
-        let errorMessage = "Failed to update task";
-        try {
-          const errorData = JSON.parse(responseText);
-          errorMessage = errorData.message || errorData.error || errorMessage;
-        } catch (e) {
-          // If response is not JSON, use the text
-          errorMessage = responseText || errorMessage;
-        }
-        throw new Error(errorMessage);
+        throw new Error(responseData.message || "Failed to update task");
       }
 
-      const responseData = JSON.parse(responseText);
       const updatedTask = responseData;
-      
       setTasks((prev) =>
         prev.map((task) =>
           task._id === updatedTask._id ? { ...task, ...updatedTask } : task
@@ -514,6 +385,7 @@ const fetchDevelopers = async () => {
         title: "Task Unposted Successfully",
         description: "The task has been moved back for review.",
         duration: 5000,
+        className: "bg-green-100 text-green-800 border border-green-200",
       });
     } catch (error: any) {
       console.error("Failed to update task:", error);
@@ -748,7 +620,7 @@ const fetchDevelopers = async () => {
       {/* Edit Task Modal */}
       {selectedTask && (
         <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-          <DialogContent className="w-[95vw] max-w-[800px] max-h-[80vh] overflow-y-auto bg-gray-50">
+          <DialogContent className="w-[95vw] max-w-[800px] max-h-[80vh] overflow-y-auto bg-gray-50 bg-[url('data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI1IiBoZWlnaHQ9IjUiPgo8cmVjdCB3aWR0aD0iNSIgaGVpZ2h0PSI1IiBmaWxsPSIjZmZmIj48L3JlY3Q+CjxwYXRoIGQ9Ik0wIDVMNSAwWk02IDRMNCA2Wk0tMSAxTDEgLTFaIiBzdHJva2U9IiNlMGUwZTAiIHN0cm9rZS13aWR0aD0iMSI+PC9wYXRoPgo8L3N2Zz4=')]">
             <DialogHeader>
               <DialogTitle className="text-left border-b pb-2 text-orange-700">
                 Unpost Task - {selectedTask.code}
@@ -756,7 +628,6 @@ const fetchDevelopers = async () => {
             </DialogHeader>
             <form onSubmit={handleModalSubmit}>
               <div className="grid gap-4 py-4">
-                {/* Company Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3 flex items-center gap-2">
                     <Building className="h-4 w-4" /> Company Details
@@ -799,7 +670,6 @@ const fetchDevelopers = async () => {
                   </div>
                 </div>
 
-                {/* Contact Information */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Contact Information</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -828,7 +698,6 @@ const fetchDevelopers = async () => {
                   </div>
                 </div>
 
-                {/* Task Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Task Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -840,6 +709,12 @@ const fetchDevelopers = async () => {
                       name="working"
                       defaultValue={selectedTask.working || ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          working: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -852,23 +727,28 @@ const fetchDevelopers = async () => {
                       type="datetime-local"
                       defaultValue={selectedTask.dateTime ? new Date(selectedTask.dateTime).toISOString().slice(0, 16) : ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          dateTime: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
-                    <Label htmlFor="priority" className="text-left text-gray-600">
-                      Priority
+                    <Label htmlFor="status" className="text-left text-gray-600">
+                      Status
                     </Label>
                     <Input
-                      id="priority"
-                      name="priority"
-                      value={selectedTask.priority || "Normal"}
+                      id="status"
+                      name="status"
+                      value={selectedTask.status || "completed"}
                       className="col-span-3"
                       disabled
                     />
                   </div>
                 </div>
 
-                {/* Assignment Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Assignment Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -877,19 +757,29 @@ const fetchDevelopers = async () => {
                     </Label>
                     <Select
                       name="assignedTo"
-                      defaultValue={selectedTask.assignedTo?.id || ""}
+                      value={selectedTask.assignedTo?.id || ""}
+                      onValueChange={(value) => {
+                        const developer = developers.find(dev => dev._id === value);
+                        setSelectedTask({
+                          ...selectedTask,
+                          assignedTo: developer
+                            ? {
+                                id: developer._id,
+                                username: developer.username,
+                                name: developer.name,
+                                role: { name: developer.role.name },
+                              }
+                            : null,
+                        });
+                      }}
                     >
                       <SelectTrigger className="col-span-3">
                         <SelectValue placeholder="Select a developer" />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="">Unassigned</SelectItem>
                         {developers.map((developer) => (
                           <SelectItem key={developer._id} value={developer._id}>
-                            <div className="flex items-center gap-2">
-                              <User className="h-4 w-4" />
-                              <span>{developer.name} ({developer.username})</span>
-                            </div>
+                            {developer.name} ({developer.username})
                           </SelectItem>
                         ))}
                       </SelectContent>
@@ -905,11 +795,16 @@ const fetchDevelopers = async () => {
                       type="datetime-local"
                       defaultValue={selectedTask.assignedDate ? new Date(selectedTask.assignedDate).toISOString().slice(0, 16) : ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          assignedDate: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                 </div>
 
-                {/* Developer Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Developer Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -933,6 +828,12 @@ const fetchDevelopers = async () => {
                       name="developerRemarks"
                       defaultValue={selectedTask.developer_remarks || ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          developer_remarks: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
@@ -944,52 +845,34 @@ const fetchDevelopers = async () => {
                         id="developerAttachment"
                         name="developerAttachment"
                         type="file"
-                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewDeveloperFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingDeveloperAttachments.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, existingDeveloperAttachments, 'developer')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({existingDeveloperAttachments.length})
-                            </Button>
-                            <ul className="space-y-1">
-                              {existingDeveloperAttachments.map((attachment, index) => (
-                                <li key={index} className="flex items-center justify-between">
-                                  <div className="flex items-center">
-                                    <FileText className="h-3 w-3 mr-1" />
-                                    <a 
-                                      href={getDownloadUrl(attachment)} 
-                                      target="_blank" 
-                                      rel="noopener noreferrer" 
-                                      className="text-blue-600 hover:underline text-xs"
-                                      onClick={(e) => handleFileClick(e, attachment)}
-                                    >
-                                      Attachment {index + 1}
-                                    </a>
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => removeExistingAttachment(index, setExistingDeveloperAttachments, "developer")}
-                                    className="h-4 w-4 p-0"
-                                  >
-                                    <X className="h-3 w-3" />
-                                  </Button>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                          <ul className="space-y-1">
+                            {existingDeveloperAttachments.map((attachment, index) => (
+                              <li key={index} className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <FileText className="h-3 w-3 mr-1" />
+                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
+                                    Attachment {index + 1}
+                                  </a>
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => removeExistingAttachment(index, setExistingDeveloperAttachments, "developer")}
+                                  className="h-4 w-4 p-0"
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </li>
+                            ))}
+                          </ul>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
@@ -1021,7 +904,6 @@ const fetchDevelopers = async () => {
                   </div>
                 </div>
 
-                {/* Approval Details */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Approval Details</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -1058,11 +940,16 @@ const fetchDevelopers = async () => {
                       type="datetime-local"
                       defaultValue={selectedTask.approvedAt ? new Date(selectedTask.approvedAt).toISOString().slice(0, 16) : ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          approvedAt: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                 </div>
 
-                {/* Remarks */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Remarks</h3>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -1074,6 +961,12 @@ const fetchDevelopers = async () => {
                       name="TaskRemarks"
                       defaultValue={selectedTask.TaskRemarks || ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          TaskRemarks: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
@@ -1085,6 +978,12 @@ const fetchDevelopers = async () => {
                       name="assignmentRemarks"
                       defaultValue={selectedTask.assignmentRemarks || ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          assignmentRemarks: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                   <div className="grid grid-cols-4 items-start gap-4">
@@ -1096,15 +995,18 @@ const fetchDevelopers = async () => {
                       name="completionRemarks"
                       defaultValue={selectedTask.completionRemarks || ""}
                       className="col-span-3"
+                      onChange={(e) => {
+                        setSelectedTask({
+                          ...selectedTask,
+                          completionRemarks: e.target.value,
+                        });
+                      }}
                     />
                   </div>
                 </div>
 
-                {/* Attachments */}
                 <div className="bg-white p-4 rounded-lg border">
                   <h3 className="font-semibold text-gray-700 mb-3">Attachments</h3>
-                  
-                  {/* Task Attachments */}
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
                     <Label htmlFor="TasksAttachment" className="text-left text-gray-600">
                       Task Attachments
@@ -1114,52 +1016,34 @@ const fetchDevelopers = async () => {
                         id="TasksAttachment"
                         name="TasksAttachment"
                         type="file"
-                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewTaskFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingTaskAttachments.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, existingTaskAttachments, 'task')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({existingTaskAttachments.length})
-                            </Button>
-                            <ul className="space-y-1">
-                              {existingTaskAttachments.map((attachment, index) => (
-                                <li key={index} className="flex items-center justify-between">
-                                  <div className="flex items-center">
-                                    <FileText className="h-3 w-3 mr-1" />
-                                    <a 
-                                      href={getDownloadUrl(attachment)} 
-                                      target="_blank" 
-                                      rel="noopener noreferrer" 
-                                      className="text-blue-600 hover:underline text-xs"
-                                      onClick={(e) => handleFileClick(e, attachment)}
-                                    >
-                                      Attachment {index + 1}
-                                    </a>
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => removeExistingAttachment(index, setExistingTaskAttachments, "task")}
-                                    className="h-4 w-4 p-0"
-                                  >
-                                    <X className="h-3 w-3" />
-                                  </Button>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                          <ul className="space-y-1">
+                            {existingTaskAttachments.map((attachment, index) => (
+                              <li key={index} className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <FileText className="h-3 w-3 mr-1" />
+                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
+                                    Attachment {index + 1}
+                                  </a>
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => removeExistingAttachment(index, setExistingTaskAttachments, "task")}
+                                  className="h-4 w-4 p-0"
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </li>
+                            ))}
+                          </ul>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
@@ -1189,8 +1073,6 @@ const fetchDevelopers = async () => {
                       </div>
                     </div>
                   </div>
-
-                  {/* Assignment Attachments */}
                   <div className="grid grid-cols-4 items-start gap-4 mb-3">
                     <Label htmlFor="assignmentAttachment" className="text-left text-gray-600">
                       Assignment Attachments
@@ -1200,52 +1082,34 @@ const fetchDevelopers = async () => {
                         id="assignmentAttachment"
                         name="assignmentAttachment"
                         type="file"
-                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewAssignmentFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingAssignmentAttachments.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, existingAssignmentAttachments, 'assignment')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({existingAssignmentAttachments.length})
-                            </Button>
-                            <ul className="space-y-1">
-                              {existingAssignmentAttachments.map((attachment, index) => (
-                                <li key={index} className="flex items-center justify-between">
-                                  <div className="flex items-center">
-                                    <FileText className="h-3 w-3 mr-1" />
-                                    <a 
-                                      href={getDownloadUrl(attachment)} 
-                                      target="_blank" 
-                                      rel="noopener noreferrer" 
-                                      className="text-blue-600 hover:underline text-xs"
-                                      onClick={(e) => handleFileClick(e, attachment)}
-                                    >
-                                      Attachment {index + 1}
-                                    </a>
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => removeExistingAttachment(index, setExistingAssignmentAttachments, "assignment")}
-                                    className="h-4 w-4 p-0"
-                                  >
-                                    <X className="h-3 w-3" />
-                                  </Button>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                          <ul className="space-y-1">
+                            {existingAssignmentAttachments.map((attachment, index) => (
+                              <li key={index} className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <FileText className="h-3 w-3 mr-1" />
+                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
+                                    Attachment {index + 1}
+                                  </a>
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => removeExistingAttachment(index, setExistingAssignmentAttachments, "assignment")}
+                                  className="h-4 w-4 p-0"
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </li>
+                            ))}
+                          </ul>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}
@@ -1275,8 +1139,6 @@ const fetchDevelopers = async () => {
                       </div>
                     </div>
                   </div>
-
-                  {/* Completion Attachments */}
                   <div className="grid grid-cols-4 items-start gap-4">
                     <Label htmlFor="completionAttachment" className="text-left text-gray-600">
                       Completion Attachments
@@ -1286,52 +1148,34 @@ const fetchDevelopers = async () => {
                         id="completionAttachment"
                         name="completionAttachment"
                         type="file"
-                        accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
+                          accept=".txt,.doc,.docx,.xls,.xlsx,.pdf,.png,.jpg,.jpeg,.gif,.bmp,.csv,.rtf,.odt,.ods,.odp"
                         multiple
                         onChange={(e) => handleFileChange(e, setNewCompletionFiles)}
                       />
                       <div className="mt-2">
                         <p className="text-sm font-medium mb-1">Existing Attachments:</p>
                         {existingCompletionAttachments.length > 0 ? (
-                          <div className="space-y-2">
-                            <Button 
-                              type="button" 
-                              variant="outline" 
-                              size="sm" 
-                              className="text-xs"
-                              onClick={() => downloadAllAttachments(selectedTask._id, existingCompletionAttachments, 'completion')}
-                            >
-                              <Download className="h-3 w-3 mr-1" />
-                              Download All ({existingCompletionAttachments.length})
-                            </Button>
-                            <ul className="space-y-1">
-                              {existingCompletionAttachments.map((attachment, index) => (
-                                <li key={index} className="flex items-center justify-between">
-                                  <div className="flex items-center">
-                                    <FileText className="h-3 w-3 mr-1" />
-                                    <a 
-                                      href={getDownloadUrl(attachment)} 
-                                      target="_blank" 
-                                      rel="noopener noreferrer" 
-                                      className="text-blue-600 hover:underline text-xs"
-                                      onClick={(e) => handleFileClick(e, attachment)}
-                                    >
-                                      Attachment {index + 1}
-                                    </a>
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => removeExistingAttachment(index, setExistingCompletionAttachments, "completion")}
-                                    className="h-4 w-4 p-0"
-                                  >
-                                    <X className="h-3 w-3" />
-                                  </Button>
-                                </li>
-                              ))}
-                            </ul>
-                          </div>
+                          <ul className="space-y-1">
+                            {existingCompletionAttachments.map((attachment, index) => (
+                              <li key={index} className="flex items-center justify-between">
+                                <div className="flex items-center">
+                                  <FileText className="h-3 w-3 mr-1" />
+                                  <a href={attachment} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-xs">
+                                    Attachment {index + 1}
+                                  </a>
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="ghost"
+                                  size="sm"
+                                  onClick={() => removeExistingAttachment(index, setExistingCompletionAttachments, "completion")}
+                                  className="h-4 w-4 p-0"
+                                >
+                                  <X className="h-3 w-3" />
+                                </Button>
+                              </li>
+                            ))}
+                          </ul>
                         ) : (
                           <p className="text-xs text-muted-foreground">No existing attachments</p>
                         )}

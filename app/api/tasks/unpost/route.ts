@@ -2,12 +2,9 @@ import { NextResponse } from "next/server"
 import dbConnect from "@/lib/db"
 import Task from "@/models/Task"
 import jwt from "jsonwebtoken"
-import { GridFSBucket } from "mongodb"
-import mongoose from "mongoose"
 
 export async function PUT(req: Request) {
   await dbConnect()
-  
   try {
     const { taskIds } = await req.json()
 
@@ -46,15 +43,6 @@ export async function PUT(req: Request) {
       )
     }
 
-    // Get GridFS bucket for file operations
-    const db = mongoose.connection.db
-    if (!db) {
-      return NextResponse.json({ message: "Database connection failed" }, { status: 500 })
-    }
-
-    const bucket = new GridFSBucket(db, { bucketName: "uploads" })
-
-    // Update tasks
     const updatedTasks = await Task.updateMany(
       { _id: { $in: ids } },
       {
@@ -62,7 +50,6 @@ export async function PUT(req: Request) {
         unpostedAt: new Date().toISOString(),
         status: "unposted",
         finalStatus: "unposted",
-        updatedAt: new Date().toISOString(),
       }
     )
 
