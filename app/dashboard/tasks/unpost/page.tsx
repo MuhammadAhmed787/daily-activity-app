@@ -77,131 +77,135 @@ export default function UnpostTasksPage() {
   const [existingDeveloperAttachments, setExistingDeveloperAttachments] = useState<string[]>([]);
 
   // Helper function to get download URL for any attachment
-  const getDownloadUrl = (attachment: string): string => {
-    if (attachment.startsWith('/')) {
-      return `${window.location.origin}${attachment}`;
-    } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-      return `/api/files/download?fileId=${attachment}`;
-    }
-    return attachment;
-  };
+const getDownloadUrl = (attachment: string): string => {
+  if (attachment.startsWith('/')) {
+    return `${window.location.origin}${attachment}`;
+  } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+    return `/api/tasks?fileId=${attachment}`; // Changed to match AllTasksPage
+  }
+  return attachment;
+};
 
-  // Helper function to handle individual file click
-  const handleFileClick = (e: React.MouseEvent, attachment: string) => {
-    if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-      e.preventDefault();
-      const downloadUrl = getDownloadUrl(attachment);
-      window.open(downloadUrl, '_blank');
-    }
-  };
-
-  // Fast parallel download function
-  const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
-    if (!attachments || attachments.length === 0) {
-      toast({
-        title: "No Files",
-        description: "No attachments available to download",
-        variant: "default",
-      });
-      return;
-    }
-
-    const toastId = toast({
-      title: "Preparing Download",
-      description: "Starting download...",
-      duration: 2000,
+  // Fast parallel download function - matches AllTasksPage pattern
+const downloadAllAttachments = async (taskId: string, attachments: string[], type: string) => {
+  if (!attachments || attachments.length === 0) {
+    toast({
+      title: "No Files",
+      description: "No attachments available to download",
+      variant: "default",
     });
+    return;
+  }
 
-    try {
-      const zip = new JSZip();
-      const failedDownloads: string[] = [];
+  const toastId = toast({
+    title: "Preparing Download",
+    description: "Starting download...",
+    duration: 2000,
+  });
 
-      for (let i = 0; i < attachments.length; i++) {
-        const attachment = attachments[i];
-        
-        try {
-          let fileUrl: string;
-          let fileName: string;
+  try {
+    const zip = new JSZip();
+    const failedDownloads: string[] = [];
 
-          if (attachment.startsWith('/')) {
-            fileUrl = `${window.location.origin}${attachment}`;
-            fileName = `file-${i + 1}${getFileExtensionFromPath(attachment)}`;
-          } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
-            fileUrl = `/api/files/download?fileId=${attachment}`;
-            fileName = `file-${i + 1}`;
-          } else if (attachment.startsWith('http')) {
-            fileUrl = attachment;
-            fileName = `file-${i + 1}`;
-          } else {
-            fileUrl = `/api/files/download?fileId=${attachment}`;
-            fileName = `file-${i + 1}`;
-          }
-
-          const response = await fetch(fileUrl);
-          
-          if (!response.ok) {
-            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-          }
-
-          const blob = await response.blob();
-          
-          if (blob.size === 0) {
-            throw new Error('Empty file received');
-          }
-
-          const contentDisposition = response.headers.get('content-disposition');
-          if (contentDisposition) {
-            const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-            if (filenameMatch && filenameMatch[1]) {
-              fileName = filenameMatch[1];
-            }
-          }
-
-          zip.file(fileName, blob);
-          
-        } catch (error) {
-          console.error(`Failed to download file ${i + 1}:`, error);
-          failedDownloads.push(`File ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
-          zip.file(`error-file-${i + 1}.txt`, `Failed to download: ${attachment}\nError: ${error}`);
-        }
-      }
-
-      const content = await zip.generateAsync({ 
-        type: "blob",
-        compression: "STORE"
-      });
+    for (let i = 0; i < attachments.length; i++) {
+      const attachment = attachments[i];
       
-      saveAs(content, `task-${taskId}-${type}-attachments.zip`);
+      try {
+        let fileUrl: string;
+        let fileName: string;
 
-      if (failedDownloads.length > 0) {
-        toast({
-          title: "Download Complete with Errors",
-          description: `Downloaded ${attachments.length - failedDownloads.length} files, ${failedDownloads.length} failed`,
-          variant: "destructive",
-        });
-      } else {
-        toast({
-          title: "Download Complete",
-          description: `Successfully downloaded ${attachments.length} files`,
-          duration: 2000,
-        });
+        // Use the same logic as AllTasksPage
+        if (attachment.startsWith('/')) {
+          fileUrl = `${window.location.origin}${attachment}`;
+          fileName = `file-${i + 1}${getFileExtensionFromPath(attachment)}`;
+        } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+          fileUrl = `/api/tasks?fileId=${attachment}`; // Match AllTasksPage endpoint
+          fileName = `file-${i + 1}`;
+        } else if (attachment.startsWith('http')) {
+          fileUrl = attachment;
+          fileName = `file-${i + 1}`;
+        } else {
+          fileUrl = `/api/tasks?fileId=${attachment}`; // Default to tasks endpoint
+          fileName = `file-${i + 1}`;
+        }
+
+        console.log(`Downloading file ${i + 1}:`, { fileUrl, fileName });
+
+        const response = await fetch(fileUrl);
+        
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
+
+        const blob = await response.blob();
+        
+        if (blob.size === 0) {
+          throw new Error('Empty file received');
+        }
+
+        // Try to get filename from response headers
+        const contentDisposition = response.headers.get('content-disposition');
+        if (contentDisposition) {
+          const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
+          if (filenameMatch && filenameMatch[1]) {
+            fileName = filenameMatch[1];
+          }
+        }
+
+        zip.file(fileName, blob);
+        
+      } catch (error) {
+        console.error(`Failed to download file ${i + 1}:`, error);
+        failedDownloads.push(`File ${i + 1}: ${error instanceof Error ? error.message : String(error)}`);
+        zip.file(`error-file-${i + 1}.txt`, `Failed to download: ${attachment}\nError: ${error}`);
       }
+    }
 
-    } catch (error) {
-      console.error("Error in download process:", error);
+    const content = await zip.generateAsync({ 
+      type: "blob",
+      compression: "STORE"
+    });
+    
+    saveAs(content, `task-${taskId}-${type}-attachments.zip`);
+
+    if (failedDownloads.length > 0) {
       toast({
-        title: "Download Error",
-        description: "Failed to process download. Please try again.",
+        title: "Download Complete with Errors",
+        description: `Downloaded ${attachments.length - failedDownloads.length} files, ${failedDownloads.length} failed`,
         variant: "destructive",
       });
+    } else {
+      toast({
+        title: "Download Complete",
+        description: `Successfully downloaded ${attachments.length} files`,
+        duration: 2000,
+      });
     }
-  };
 
-  // Helper function to get file extension from path
-  const getFileExtensionFromPath = (path: string): string => {
-    const match = path.match(/\.([a-zA-Z0-9]+)$/);
-    return match ? `.${match[1]}` : '';
-  };
+  } catch (error) {
+    console.error("Error in download process:", error);
+    toast({
+      title: "Download Error",
+      description: "Failed to process download. Please try again.",
+      variant: "destructive",
+    });
+  }
+};
+
+// Helper function to get file extension from path
+const getFileExtensionFromPath = (path: string): string => {
+  const match = path.match(/\.([a-zA-Z0-9]+)$/);
+  return match ? `.${match[1]}` : '';
+};
+
+// Update your handleFileClick to match AllTasksPage pattern
+const handleFileClick = (e: React.MouseEvent, attachment: string) => {
+  if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+    e.preventDefault();
+    const downloadUrl = getDownloadUrl(attachment);
+    window.open(downloadUrl, '_blank');
+  }
+};
 
   useEffect(() => {
     const userData = localStorage.getItem("user");
@@ -1169,31 +1173,36 @@ export default function UnpostTasksPage() {
                               Download All ({existingTaskAttachments.length})
                             </Button>
                             <ul className="space-y-1">
-                              {existingTaskAttachments.map((attachment, index) => (
-                                <li key={index} className="flex items-center justify-between">
-                                  <div className="flex items-center">
-                                    <FileText className="h-3 w-3 mr-1" />
-                                    <a 
-                                      href={getDownloadUrl(attachment)} 
-                                      target="_blank" 
-                                      rel="noopener noreferrer" 
-                                      className="text-blue-600 hover:underline text-xs"
-                                      onClick={(e) => handleFileClick(e, attachment)}
-                                    >
-                                      Attachment {index + 1}
-                                    </a>
-                                  </div>
-                                  <Button
-                                    type="button"
-                                    variant="ghost"
-                                    size="sm"
-                                    onClick={() => removeExistingAttachment(index, setExistingTaskAttachments, "task")}
-                                    className="h-4 w-4 p-0"
-                                  >
-                                    <X className="h-3 w-3" />
-                                  </Button>
-                                </li>
-                              ))}
+                              {existingTaskAttachments.map((attachment, index) => {
+  let fileUrl: string;
+  let onClickHandler: ((e: React.MouseEvent) => void) | undefined;
+
+  if (attachment.startsWith('/')) {
+    fileUrl = `${window.location.origin}${attachment}`;
+  } else if (/^[0-9a-fA-F]{24}$/.test(attachment)) {
+    fileUrl = `/api/tasks?fileId=${attachment}`;
+    onClickHandler = (e: React.MouseEvent) => {
+      e.preventDefault();
+      window.open(fileUrl, '_blank');
+    };
+  } else {
+    fileUrl = attachment;
+  }
+
+  return (
+    <a 
+      key={index}
+      href={fileUrl}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="text-blue-600 hover:underline text-xs flex items-center gap-1"
+      onClick={onClickHandler}
+    >
+      <FileText className="h-3 w-3" />
+      File {index + 1}
+    </a>
+  );
+})}
                             </ul>
                           </div>
                         ) : (
